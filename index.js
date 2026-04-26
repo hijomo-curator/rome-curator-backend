@@ -128,7 +128,7 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
     const maxTokens = getTokenLimit(days);
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: maxTokens,
       system: getSystemPrompt(city),
       messages: [{
@@ -176,7 +176,7 @@ app.post("/refine-day", limiter, async (req, res) => {
     console.log(`[refine] IP: ${ip} | City: ${city} | Day: ${day.day} | Count: ${usageByIP[ip].refinements}`);
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 1200,
       messages: [{
         role: "user",
