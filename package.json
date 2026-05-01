@@ -2,6 +2,7 @@
   "name": "rome-curator-backend",
   "version": "1.0.0",
   "description": "Rome Curator backend API",
+  "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
