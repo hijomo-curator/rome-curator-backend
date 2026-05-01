@@ -1,279 +1,385 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import Anthropic from "@anthropic-ai/sdk";
-import rateLimit from "express-rate-limit";
-
-dotenv.config();
+const express = require("express");
+const Anthropic = require("@anthropic-ai/sdk");
+const rateLimit = require("express-rate-limit");
+const cors = require("cors");
 
 const app = express();
-app.set("trust proxy", 1);
+app.use(express.json());
 
-const limiter = rateLimit({
+// ─── CORS ────────────────────────────────────────────────────────────────────
+const allowedOrigins = [
+  process.env.FRONTEND_URL || "https://rome-curator-frontend.vercel.app",
+];
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+  })
+);
+
+// ─── RATE LIMITING ───────────────────────────────────────────────────────────
+const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
   message: { error: "Too many requests. Please try again in 15 minutes." },
 });
+app.use(generalLimiter);
 
-const ALLOWED_ORIGINS = [
-  "http://localhost:3000",
-  "http://localhost:5500",
-  "http://127.0.0.1:5500",
-  "https://rome-curator-frontend.vercel.app",
-  process.env.FRONTEND_URL,
-].filter(Boolean);
-
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) callback(null, true);
-    else callback(new Error("Not allowed by CORS"));
-  },
-  methods: ["GET", "POST"],
-}));
-
-app.use(express.json({ limit: "10kb" }));
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
+// Hard caps per IP
+const generationCounts = {};
+const refinementCounts = {};
 const MAX_GENERATIONS = 5;
 const MAX_REFINEMENTS = 10;
-const usageByIP = {};
 
-function getIP(req) { return req.ip || req.connection.remoteAddress || "unknown"; }
-function initUsage(ip) { if (!usageByIP[ip]) usageByIP[ip] = { generations: 0, refinements: 0 }; }
-function getTokenLimit(days) {
-  if (days <= 3) return 2000;
-  if (days <= 5) return 3000;
-  if (days <= 7) return 4000;
-  return 5000;
-}
+// ─── ANTHROPIC CLIENT ────────────────────────────────────────────────────────
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const MONTH_NAMES = ['','January','February','March','April','May','June','July','August','September','October','November','December'];
+// ─── RESEND EMAIL HELPER ─────────────────────────────────────────────────────
+async function sendItineraryEmail({ toEmail, firstName, city, itineraryHtml, travelMonth, travellers, budget }) {
+  const RESEND_API_KEY = process.env.RESEND_API_KEY;
+  if (!RESEND_API_KEY) {
+    console.log("RESEND_API_KEY not set — skipping email send");
+    return { skipped: true };
+  }
 
-const TRAVEL_STYLE_LABELS = {
-  solo_male: 'solo male traveller',
-  solo_female: 'solo female traveller',
-  couple: 'couple',
-  friends: 'group of friends',
-  family_kids: 'family with young children',
-  family_elderly: 'family with elderly members',
-};
+  const subject = `Your ${city} itinerary is here, ${firstName} ✈️`;
 
-const BUDGET_LABELS = {
-  backpacker: 'backpacker (budget-conscious, hostels, street food, free attractions)',
-  'mid-range': 'mid-range (comfortable hotels, sit-down restaurants, paid attractions)',
-  luxury: 'luxury (boutique hotels, fine dining, private experiences, skip-the-line)',
-};
+  const emailBody = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Your Rome Curator Itinerary</title>
+  <style>
+    body { margin: 0; padding: 0; background: #FAF7F2; font-family: Georgia, serif; color: #2C1810; }
+    .wrapper { max-width: 620px; margin: 0 auto; background: #FAF7F2; }
+    .header { background: #B85C38; padding: 32px 24px; text-align: center; }
+    .header h1 { margin: 0; color: #FAF7F2; font-size: 28px; letter-spacing: 2px; font-family: Georgia, serif; }
+    .header p { margin: 6px 0 0; color: #F5D9C8; font-size: 14px; letter-spacing: 1px; }
+    .meta { background: #F5D9C8; padding: 16px 24px; border-bottom: 1px solid #D4956A; }
+    .meta p { margin: 4px 0; font-size: 14px; color: #5C2E1A; }
+    .meta strong { color: #B85C38; }
+    .content { padding: 24px; }
+    .content h2 { color: #B85C38; font-size: 18px; border-bottom: 1px solid #D4956A; padding-bottom: 8px; margin-top: 28px; }
+    .content p { line-height: 1.7; font-size: 15px; color: #2C1810; }
+    .itinerary-block { background: #fff; border-left: 4px solid #B85C38; border-radius: 4px; padding: 16px 20px; margin: 16px 0; }
+    .footer { background: #2C1810; padding: 20px 24px; text-align: center; }
+    .footer p { color: #D4956A; font-size: 12px; margin: 4px 0; line-height: 1.6; }
+    .footer a { color: #F5D9C8; text-decoration: none; }
+    .cta { display: block; margin: 24px auto; background: #B85C38; color: #FAF7F2 !important; text-decoration: none; padding: 14px 32px; border-radius: 4px; font-size: 16px; text-align: center; width: fit-content; letter-spacing: 1px; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>ROME CURATOR</h1>
+      <p>Your personal ${city} itinerary</p>
+    </div>
 
-function getSystemPrompt(city, month, travelStyle, budget) {
-  const monthName = month ? MONTH_NAMES[month] : null;
-  const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle;
-  const budgetLabel = BUDGET_LABELS[budget] || budget;
+    <div class="meta">
+      <p><strong>Traveller:</strong> ${firstName}</p>
+      <p><strong>Destination:</strong> ${city}</p>
+      <p><strong>Travel month:</strong> ${travelMonth}</p>
+      <p><strong>Party:</strong> ${travellers} &nbsp;|&nbsp; <strong>Budget:</strong> ${budget}</p>
+    </div>
 
-  const soloFemaleNote = travelStyle === 'solo_female' ? `
-SOLO FEMALE SAFETY RULES:
-- Only recommend areas that are well-lit, busy, and considered safe for solo female travellers.
-- For evening activities, prioritise busy bars, restaurants, and areas with good foot traffic.
-- For off-beat spots, add a safety note: e.g. "busy and safe during the day".
-- Avoid isolated areas, poorly lit streets, or locations known for harassment.
-- Never recommend arriving somewhere very late at night alone.` : '';
+    <div class="content">
+      <p>Hi ${firstName},</p>
+      <p>Here's the curated itinerary we built for your trip to <strong>${city}</strong>. It's been tailored to your travel style, travel month, and budget — so every recommendation actually fits your trip.</p>
 
-  const elderlyNote = travelStyle === 'family_elderly' ? `
-ELDERLY-FRIENDLY RULES:
-- Avoid recommendations requiring significant walking, climbing, or long standing periods.
-- Prefer attractions with good accessibility, seating, and facilities.
-- Include rest breaks in the day structure.
-- Prefer ground-floor or lift-accessible venues.
-- Avoid cobblestone-heavy routes where possible.` : '';
+      <div class="itinerary-block">
+        ${itineraryHtml}
+      </div>
 
-  const familyNote = travelStyle === 'family_kids' ? `
-FAMILY WITH KIDS RULES:
-- Include at least one child-friendly activity per day.
-- Avoid overly long museum visits — keep sights varied and engaging.
-- Suggest restaurants that are kid-friendly and relaxed.
-- Build in rest time and don't over-schedule.` : '';
+      <a class="cta" href="https://rome-curator-frontend.vercel.app">Plan another trip →</a>
 
-  return `You are the Rome Curator's local expert for ${city} — a deeply knowledgeable friend who has lived in ${city} for years, eats obsessively well, and hates tourist traps.
+      <h2>A few travel tips</h2>
+      <p>🗓 Save this email — you'll want it when you're offline.<br/>
+      📍 Screenshot your daily plans before heading out.<br/>
+      🔁 You can always go back and generate another itinerary anytime.</p>
+    </div>
 
-TRIP CONTEXT:
-- Travelling: ${styleLabel}
-- Budget: ${budgetLabel}
-${monthName ? `- Travel month: ${monthName} — factor in seasonal weather, crowds, local events, and what's open or closed.` : ''}
-${soloFemaleNote}${elderlyNote}${familyNote}
+    <div class="footer">
+      <p>Curated with care by <strong>Rome Curator</strong></p>
+      <p>This itinerary was AI-generated and is meant as a starting point. Always verify opening hours, prices, and bookings before your trip.</p>
+      <p style="margin-top:12px; color:#8B6B55;">© 2025 Rome Curator · <a href="https://rome-curator-frontend.vercel.app">Visit the app</a></p>
+    </div>
+  </div>
+</body>
+</html>
+  `.trim();
 
-CURATION PHILOSOPHY:
-- Local always beats touristy. Iconic landmarks only if they carry genuine human historical/cultural significance.
-- Food is the anchor of every day. Sights come second.
-- Maximum one iconic landmark per day.
-- Be ruthlessly specific: name the exact place, dish, street, best time. Never generic advice.
-- Plan in walkable neighbourhood clusters. Never send someone across the city for one thing.
-- Warn about tourist traps near recommended spots.
-- Match budget strictly: backpacker = street food, free sights. Mid-range = sit-down meals, paid museums. Luxury = tasting menus, private tours, rooftop bars.
-- Nature = parks, coastal walks, hill viewpoints, countryside day trips.
-- Off-beat = hidden urban gems, unusual neighbourhoods.
-- Nightlife = bars open late, live music, clubs — distinct from drinks/aperitivo.
-- Adapt to pace: relaxed = fewer things, more lingering; packed = efficient routing, more stops.
-
-HARD RULES:
-- Return ONLY valid JSON. No markdown, no explanation, no text outside the JSON object.
-- Every morning, afternoon and evening block must have exactly 3 bullet points.
-- Each bullet: name the exact place, what to order or do, and why — all in one specific sentence.
-- The "why" field: exactly 2 sentences explaining the day's curation logic.
-
-Return this exact JSON shape:
-{"title":"short evocative title","meta":"e.g. 4 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":["bullet","bullet","bullet"],"afternoon":["bullet","bullet","bullet"],"evening":["bullet","bullet","bullet"],"why":"2-sentence rationale"}]}`;
-}
-
-// ── Save email to Google Sheets via Sheetdb ───────────────────────
-async function saveEmailToSheet(firstName, lastName, email, country, source) {
   try {
-    const res = await fetch(process.env.SHEETDB_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
-        data: [{
-          Timestamp: new Date().toISOString(),
-          'First Name': firstName,
-          'Last Name': lastName || '',
-          Email: email,
-          Country: country,
-          Source: source,
-        }]
-      })
+        from: "Rome Curator <onboarding@resend.dev>",
+        to: [toEmail],
+        subject,
+        html: emailBody,
+      }),
     });
-    return res.ok;
+
+    const result = await response.json();
+    if (!response.ok) {
+      console.error("Resend error:", result);
+      return { error: result };
+    }
+    console.log("Email sent via Resend:", result.id);
+    return { success: true, id: result.id };
   } catch (err) {
-    console.error('[sheet] Save failed:', err.message);
-    return false;
+    console.error("Resend fetch failed:", err.message);
+    return { error: err.message };
   }
 }
 
-// ── Health check ──────────────────────────────────────────────────
-app.get("/", (req, res) => res.json({ status: "Rome Curator backend running" }));
+// ─── HELPER: convert plain itinerary text to simple HTML ─────────────────────
+function textToEmailHtml(text) {
+  if (!text) return "";
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .split("\n")
+    .map((line) => {
+      line = line.trim();
+      if (!line) return "";
+      if (/^(##\s*)?day\s*\d+/i.test(line)) {
+        return `<h2 style="color:#B85C38;font-size:17px;margin:20px 0 8px;border-bottom:1px solid #D4956A;padding-bottom:6px;">${line.replace(/^##\s*/, "")}</h2>`;
+      }
+      if (/^(morning|afternoon|evening|lunch|dinner|breakfast|note|tip):/i.test(line)) {
+        return `<p style="margin:10px 0 4px;"><strong style="color:#B85C38;">${line.split(":")[0]}:</strong>${line.slice(line.indexOf(":") + 1)}</p>`;
+      }
+      return `<p style="margin:6px 0;line-height:1.7;">${line}</p>`;
+    })
+    .join("");
+}
 
-// ── Save email ────────────────────────────────────────────────────
-app.post("/save-email", limiter, async (req, res) => {
-  try {
-    const { firstName, lastName, email, country, source } = req.body;
-    if (!firstName || !email || !country) {
-      return res.status(400).json({ error: "Missing required fields: firstName, email, country." });
-    }
-    if (!email.includes('@')) {
-      return res.status(400).json({ error: "Invalid email address." });
-    }
-    console.log(`[email] Saving: ${email} | Source: ${source} | Country: ${country}`);
-    const ok = await saveEmailToSheet(firstName, lastName, email, country, source);
-    if (ok) return res.json({ success: true });
-    return res.status(500).json({ error: "Failed to save email." });
-  } catch (err) {
-    console.error('[email] Error:', err.message);
-    return res.status(500).json({ error: "Something went wrong saving your email." });
-  }
+// ─── SYSTEM PROMPT ───────────────────────────────────────────────────────────
+function buildSystemPrompt(city, interests, month, travellers, budget) {
+  const safetyNote =
+    travellers === "solo_female"
+      ? "This traveller is a solo woman. Prioritise well-lit, busy areas. Flag any location that is better avoided at night. Suggest female-friendly accommodation zones."
+      : "";
+
+  const elderlyNote =
+    travellers === "family_elderly"
+      ? "The group includes elderly members. Avoid steep climbs, long walks, or physically demanding activities. Prefer comfortable transport, accessible venues, and shorter days."
+      : "";
+
+  const kidsNote =
+    travellers === "family_kids"
+      ? "The group includes young children. Include child-friendly activities, gelato stops, parks, and interactive museums. Keep daily walks manageable. Avoid late-night recommendations."
+      : "";
+
+  const budgetNote = {
+    backpacker:
+      "Budget is backpacker. Prioritise free sights, street food, hostels, public transport, and low-cost hidden gems.",
+    mid_range:
+      "Mix of affordable restaurants, 3-star hotels, and occasional splurges on key experiences.",
+    luxury:
+      "Budget is luxury. Recommend fine dining, 5-star hotels, private tours, skip-the-line experiences, and premium options.",
+  }[budget] || "";
+
+  const monthNote = month
+    ? `The traveller is visiting in ${month}. Factor in seasonal weather, crowd levels, and any local festivals or events that month.`
+    : "";
+
+  return `You are Rome Curator — an expert, opinionated travel curator for ${city}.
+You create personalised, day-by-day itineraries that feel like advice from a well-travelled friend, not a generic travel blog.
+
+Travel context:
+- City: ${city}
+- Interests: ${interests.join(", ")}
+- Travellers: ${travellers}
+- Budget: ${budget}
+${monthNote}
+${safetyNote}
+${elderlyNote}
+${kidsNote}
+${budgetNote}
+
+Rules:
+- Structure each day clearly: Day 1, Day 2, etc. with Morning / Afternoon / Evening sections
+- Be specific: name actual restaurants, museums, neighbourhoods, viewpoints
+- Be opinionated: say why each pick matters, don't just list
+- End with a short "Local Tips" section (3–5 bullets)
+- Keep a warm, confident, first-person curatorial tone
+- Never use filler phrases like "of course" or "certainly"
+- Do not add a preamble or sign-off — start directly with Day 1`;
+}
+
+// ─── ROUTES ──────────────────────────────────────────────────────────────────
+
+// Health check
+app.get("/", (req, res) => {
+  res.json({ status: "Rome Curator backend is running" });
 });
 
-// ── Generate itinerary ────────────────────────────────────────────
-app.post("/generate-itinerary", limiter, async (req, res) => {
+// Generate itinerary
+app.post("/generate", async (req, res) => {
+  const ip = req.ip;
+  generationCounts[ip] = (generationCounts[ip] || 0) + 1;
+  if (generationCounts[ip] > MAX_GENERATIONS) {
+    return res.status(429).json({
+      error: "You've reached the maximum of 5 itineraries. Come back tomorrow!",
+    });
+  }
+
+  const { city, interests, month, travellers, budget, firstName, email, country } = req.body;
+
+  if (!city || !interests || !month || !travellers || !budget) {
+    return res.status(400).json({ error: "Missing required fields." });
+  }
+
+  // Save to Google Sheet
+  if (email && firstName) {
+    try {
+      await fetch(process.env.SHEETDB_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          data: [{ firstName, email, country: country || "", source: "landing_form", city, timestamp: new Date().toISOString() }],
+        }),
+      });
+    } catch (e) {
+      console.error("SheetDB error:", e.message);
+    }
+  }
+
+  const systemPrompt = buildSystemPrompt(city, interests, month, travellers, budget);
+
   try {
-    const { city, days, pace, month, travelStyle, budget, interests } = req.body;
-    const ip = getIP(req);
-    initUsage(ip);
-
-    if (!city || !days || !pace || !Array.isArray(interests) || interests.length === 0) {
-      return res.status(400).json({ error: "Missing required fields." });
-    }
-    if (days < 1 || days > 14) return res.status(400).json({ error: "Days must be between 1 and 14." });
-    if (usageByIP[ip].generations >= MAX_GENERATIONS) {
-      return res.status(429).json({ error: "Generation limit reached. Try again later." });
-    }
-
-    usageByIP[ip].generations += 1;
-    console.log(`[generate] IP: ${ip} | City: ${city} | Days: ${days} | Style: ${travelStyle} | Budget: ${budget} | Count: ${usageByIP[ip].generations}`);
-
-    const monthName = month ? MONTH_NAMES[month] : null;
-    const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle || 'traveller';
-
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-5",
-      max_tokens: getTokenLimit(days),
-      system: getSystemPrompt(city, month, travelStyle, budget),
-      messages: [{
-        role: "user",
-        content: `Plan a ${days}-day ${city} itinerary.
-Pace: ${pace}
-Travelling: ${styleLabel}
-Budget: ${budget || 'mid-range'}
-${monthName ? `Travel month: ${monthName}` : ''}
-Interests: ${interests.join(", ")}
-Food-first, local-first, walkable clusters. Name exact places, dishes, neighbourhoods.`,
-      }],
+      max_tokens: 4096,
+      messages: [
+        {
+          role: "user",
+          content: `Create a 5-day itinerary for ${city} based on my preferences.`,
+        },
+      ],
+      system: systemPrompt,
     });
 
-    const raw = message.content.find(b => b.type === "text")?.text || "";
-    const clean = raw.replace(/```json|```/g, "").trim();
+    const itineraryText = message.content[0].text;
 
-    let itinerary;
-    try {
-      itinerary = JSON.parse(clean);
-    } catch {
-      console.error("[generate] JSON parse failed:", raw.slice(0, 300));
-      return res.status(500).json({ error: "Failed to parse itinerary. Please try again." });
+    // Send email if we have the user's details
+    let emailResult = null;
+    if (email && firstName) {
+      const itineraryHtml = textToEmailHtml(itineraryText);
+      emailResult = await sendItineraryEmail({
+        toEmail: email,
+        firstName,
+        city,
+        itineraryHtml,
+        travelMonth: month,
+        travellers,
+        budget,
+      });
     }
 
-    console.log(`[generate] Success | Tokens: ${message.usage.input_tokens + message.usage.output_tokens}`);
-    return res.json(itinerary);
-
+    res.json({
+      itinerary: itineraryText,
+      emailSent: emailResult?.success || false,
+    });
   } catch (err) {
-    console.error("[generate] Error:", err.message);
-    return res.status(500).json({ error: "Something went wrong generating your itinerary. Please try again." });
+    console.error("Generation error:", err.message);
+    res.status(500).json({ error: "Failed to generate itinerary. Please try again." });
   }
 });
 
-// ── Refine a single day ───────────────────────────────────────────
-app.post("/refine-day", limiter, async (req, res) => {
+// Refine a single day
+app.post("/refine", async (req, res) => {
+  const ip = req.ip;
+  refinementCounts[ip] = (refinementCounts[ip] || 0) + 1;
+  if (refinementCounts[ip] > MAX_REFINEMENTS) {
+    return res.status(429).json({
+      error: "You've reached the maximum of 10 refinements.",
+    });
+  }
+
+  const { city, day, currentContent, interests, travellers, budget, refinementRequest } = req.body;
+
+  if (!city || !day || !currentContent) {
+    return res.status(400).json({ error: "Missing required fields." });
+  }
+
   try {
-    const { city, day, instruction } = req.body;
-    const ip = getIP(req);
-    initUsage(ip);
-
-    if (!city || typeof day !== "object" || !instruction) {
-      return res.status(400).json({ error: "Missing required fields." });
-    }
-    if (usageByIP[ip].refinements >= MAX_REFINEMENTS) {
-      return res.status(429).json({ error: "Refinement limit reached. Try again later." });
-    }
-
-    usageByIP[ip].refinements += 1;
-    console.log(`[refine] IP: ${ip} | City: ${city} | Day: ${day.day} | Count: ${usageByIP[ip].refinements}`);
-
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-5",
-      max_tokens: 1200,
-      messages: [{
-        role: "user",
-        content: `You are the Rome Curator's local expert for ${city}. Refine this single day based on the instruction. Return ONLY valid JSON with the exact same structure — no markdown, no extra text.\n\nCurrent day:\n${JSON.stringify(day)}\n\nInstruction: "${instruction}"`,
-      }],
+      max_tokens: 1024,
+      messages: [
+        {
+          role: "user",
+          content: `Here is the current ${day} itinerary for ${city}:\n\n${currentContent}\n\n${
+            refinementRequest
+              ? `Please refine it with this request: ${refinementRequest}`
+              : "Please refine this day with fresh alternatives while keeping the same structure."
+          }`,
+        },
+      ],
+      system: buildSystemPrompt(city, interests || [], null, travellers || "couple", budget || "mid_range"),
     });
 
-    const raw = message.content.find(b => b.type === "text")?.text || "";
-    const clean = raw.replace(/```json|```/g, "").trim();
-
-    let refined;
-    try {
-      refined = JSON.parse(clean);
-    } catch {
-      return res.status(500).json({ error: "Failed to parse refined day. Please try again." });
-    }
-
-    console.log(`[refine] Success | Tokens: ${message.usage.input_tokens + message.usage.output_tokens}`);
-    return res.json(refined);
-
+    res.json({ itinerary: message.content[0].text });
   } catch (err) {
-    console.error("[refine] Error:", err.message);
-    return res.status(500).json({ error: "Something went wrong. Please try again." });
+    console.error("Refinement error:", err.message);
+    res.status(500).json({ error: "Failed to refine. Please try again." });
   }
 });
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Rome Curator backend running on port ${PORT}`));
+// Save to inbox (post-itinerary email capture)
+app.post("/save-email", async (req, res) => {
+  const { email, firstName, country, city, itinerary, month, travellers, budget } = req.body;
+
+  if (!email || !firstName) {
+    return res.status(400).json({ error: "Name and email are required." });
+  }
+
+  // Save to Sheet
+  try {
+    await fetch(process.env.SHEETDB_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        data: [{ firstName, email, country: country || "", source: "save_to_inbox", city: city || "", timestamp: new Date().toISOString() }],
+      }),
+    });
+  } catch (e) {
+    console.error("SheetDB error:", e.message);
+  }
+
+  // Send email with itinerary
+  let emailResult = null;
+  if (itinerary) {
+    const itineraryHtml = textToEmailHtml(itinerary);
+    emailResult = await sendItineraryEmail({
+      toEmail: email,
+      firstName,
+      city: city || "your destination",
+      itineraryHtml,
+      travelMonth: month || "",
+      travellers: travellers || "",
+      budget: budget || "",
+    });
+  }
+
+  res.json({ success: true, emailSent: emailResult?.success || false });
+});
+
+// ─── START ───────────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Rome Curator backend running on port ${PORT}`);
+});
