@@ -326,10 +326,14 @@ Food-first, local-first, walkable clusters. Name exact places, dishes, neighbour
     });
 
     const raw = message.content.find(b => b.type === "text")?.text || "";
-    const clean = raw.replace(/```json|```/g, "").trim();
 
+    // Robustly extract JSON — find first { and last } to handle any extra text Claude adds
     let itinerary;
     try {
+      const start = raw.indexOf('{');
+      const end = raw.lastIndexOf('}');
+      if (start === -1 || end === -1) throw new Error('No JSON found');
+      const clean = raw.slice(start, end + 1);
       itinerary = JSON.parse(clean);
     } catch {
       console.error("[generate] JSON parse failed:", raw.slice(0, 300));
@@ -373,10 +377,13 @@ app.post("/refine-day", limiter, async (req, res) => {
     });
 
     const raw = message.content.find(b => b.type === "text")?.text || "";
-    const clean = raw.replace(/```json|```/g, "").trim();
 
     let refined;
     try {
+      const start = raw.indexOf('{');
+      const end = raw.lastIndexOf('}');
+      if (start === -1 || end === -1) throw new Error('No JSON found');
+      const clean = raw.slice(start, end + 1);
       refined = JSON.parse(clean);
     } catch {
       return res.status(500).json({ error: "Failed to parse refined day. Please try again." });
