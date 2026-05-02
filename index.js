@@ -237,7 +237,7 @@ async function sendItineraryEmail({ toEmail, firstName, city, itinerary, travelM
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: 'Rome Curator <onboarding@resend.dev>',
+        from: 'Rome Curator <hello@romecurator.com>',
         to: [toEmail],
         subject: `Your ${city} itinerary is here, ${firstName} ✈️`,
         html: emailHtml,
