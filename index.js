@@ -291,7 +291,7 @@ app.post("/save-email", limiter, async (req, res) => {
 // ── Generate itinerary ────────────────────────────────────────────
 app.post("/generate-itinerary", limiter, async (req, res) => {
   try {
-    const { city, days, pace, month, travelStyle, budget, interests, firstName, email } = req.body;
+    const { city, days, pace, month, travelStyle, budget, interests } = req.body;
     const ip = getIP(req);
     initUsage(ip);
 
@@ -338,13 +338,7 @@ Food-first, local-first, walkable clusters. Name exact places, dishes, neighbour
 
     console.log(`[generate] Success | Tokens: ${message.usage.input_tokens + message.usage.output_tokens}`);
 
-    // Auto-send itinerary email if user provided email on landing form
-    let emailResult = null;
-    if (email && firstName) {
-      emailResult = await sendItineraryEmail({ toEmail: email, firstName, city, itinerary, travelMonth: month, travelStyle, budget });
-    }
-
-    return res.json({ ...itinerary, emailSent: emailResult?.success || false });
+    return res.json(itinerary);
 
   } catch (err) {
     console.error("[generate] Error:", err.message);
