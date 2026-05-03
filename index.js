@@ -394,13 +394,14 @@ Food-first, local-first, walkable clusters. Name exact places, dishes, neighbour
 
     const raw = message.content.find(b => b.type === "text")?.text || "";
 
-    // Robustly extract JSON — find first { and last } to handle any extra text Claude adds
+    // Robustly extract JSON — strip markdown fences, then find first { and last }
     let itinerary;
     try {
-      const start = raw.indexOf('{');
-      const end = raw.lastIndexOf('}');
+      const stripped = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
+      const start = stripped.indexOf('{');
+      const end = stripped.lastIndexOf('}');
       if (start === -1 || end === -1) throw new Error('No JSON found');
-      const clean = raw.slice(start, end + 1);
+      const clean = stripped.slice(start, end + 1);
       itinerary = JSON.parse(clean);
     } catch {
       console.error("[generate] JSON parse failed:", raw.slice(0, 300));
@@ -447,10 +448,11 @@ app.post("/refine-day", limiter, async (req, res) => {
 
     let refined;
     try {
-      const start = raw.indexOf('{');
-      const end = raw.lastIndexOf('}');
+      const stripped = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
+      const start = stripped.indexOf('{');
+      const end = stripped.lastIndexOf('}');
       if (start === -1 || end === -1) throw new Error('No JSON found');
-      const clean = raw.slice(start, end + 1);
+      const clean = stripped.slice(start, end + 1);
       refined = JSON.parse(clean);
     } catch {
       return res.status(500).json({ error: "Failed to parse refined day. Please try again." });
