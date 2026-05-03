@@ -3,9 +3,15 @@ import cors from "cors";
 import dotenv from "dotenv";
 import Anthropic from "@anthropic-ai/sdk";
 import rateLimit from "express-rate-limit";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
+// ── Supabase client (backend only, uses secret key) ───────────────
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SECRET_KEY
+);
 const app = express();
 app.set("trust proxy", 1);
 
@@ -38,6 +44,62 @@ app.use(cors({
 app.use(express.json({ limit: "100kb" }));
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// ── Supabase helpers ──────────────────────────────────────────────
+function generateSlug() {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  return Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+}
+
+const CACHE_MONTHS = 6;
+
+async function findCachedItinerary(city, days, pace, month, travelStyle, budget, interests) {
+  try {
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - CACHE_MONTHS);
+    const { data } = await supabase
+      .from('itineraries')
+      .select('slug, data')
+      .eq('city', city)
+      .eq('days', days)
+      .eq('pace', pace)
+      .eq('month', month)
+      .eq('travel_style', travelStyle)
+      .eq('budget', budget)
+      .contains('interests', interests)
+      .gte('created_at', cutoff.toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+    return data || null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveItinerary(slug, city, days, pace, month, travelStyle, budget, interests, data) {
+  try {
+    await supabase.from('itineraries').insert({
+      slug, city, days, pace, month, travel_style: travelStyle,
+      budget, interests, data
+    });
+  } catch (err) {
+    console.error('[supabase] Save failed:', err.message);
+  }
+}
+
+async function getItineraryBySlug(slug) {
+  try {
+    const { data } = await supabase
+      .from('itineraries')
+      .select('*')
+      .eq('slug', slug)
+      .single();
+    return data || null;
+  } catch {
+    return null;
+  }
+}
 
 const MAX_GENERATIONS = 5;
 const MAX_REFINEMENTS = 10;
@@ -365,6 +427,15 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
     usageByIP[ip].generations += 1;
     console.log(`[generate] IP: ${ip} | City: ${city} | Days: ${days} | Style: ${travelStyle} | Budget: ${budget} | Count: ${usageByIP[ip].generations}`);
 
+    // ── Cache check (single city only, 6 month window) ────────────
+    if (!isMultiCity) {
+      const cached = await findCachedItinerary(city, days, pace, month, travelStyle, budget, interests);
+      if (cached) {
+        console.log(`[generate] Cache hit | slug: ${cached.slug}`);
+        return res.json({ ...cached.data, slug: cached.slug, fromCache: true });
+      }
+    }
+
     const monthName = month ? MONTH_NAMES[month] : null;
     const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle || 'traveller';
 
@@ -412,11 +483,30 @@ Food-first, local-first, walkable clusters. Name exact places, dishes, neighbour
 
     console.log(`[generate] Success | Tokens: ${message.usage.input_tokens + message.usage.output_tokens}`);
 
-    return res.json(itinerary);
+    // ── Save to Supabase ──────────────────────────────────────────
+    const slug = generateSlug();
+    await saveItinerary(slug, city, days, pace, month, travelStyle, budget, interests, itinerary);
+    console.log(`[generate] Saved | slug: ${slug}`);
+
+    return res.json({ ...itinerary, slug });
 
   } catch (err) {
     console.error("[generate] Error:", err.message);
     return res.status(500).json({ error: "Something went wrong generating your itinerary. Please try again." });
+  }
+});
+
+// ── Get itinerary by slug (shareable links) ───────────────────────
+app.get("/itinerary/:slug", async (req, res) => {
+  try {
+    const { slug } = req.params;
+    if (!slug || slug.length > 20) return res.status(400).json({ error: "Invalid slug." });
+    const record = await getItineraryBySlug(slug);
+    if (!record) return res.status(404).json({ error: "Itinerary not found." });
+    return res.json({ ...record.data, slug: record.slug, city: record.city });
+  } catch (err) {
+    console.error('[slug] Error:', err.message);
+    return res.status(500).json({ error: "Something went wrong." });
   }
 });
 
