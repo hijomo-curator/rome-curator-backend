@@ -340,7 +340,7 @@ app.post("/save-email", limiter, async (req, res) => {
 // ── Generate itinerary ────────────────────────────────────────────
 app.post("/generate-itinerary", limiter, async (req, res) => {
   try {
-    const { city, days, pace, month, travelStyle, budget, interests } = req.body;
+    const { city, cities, isMultiCity, days, pace, month, travelStyle, budget, interests } = req.body;
     const ip = getIP(req);
     initUsage(ip);
 
@@ -361,10 +361,20 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-5",
       max_tokens: getTokenLimit(days),
-      system: getSystemPrompt(city, month, travelStyle, budget),
+      system: getSystemPrompt(isMultiCity ? cities[0] : city, month, travelStyle, budget),
       messages: [{
         role: "user",
-        content: `Plan a ${days}-day ${city} itinerary.
+        content: isMultiCity
+          ? `Plan a ${days}-day multi-city itinerary across ${cities.join(', ')} in that order.
+Pace: ${pace}
+Travelling: ${styleLabel}
+Budget: ${budget || 'mid-range'}
+${monthName ? `Travel month: ${monthName}` : ''}
+Interests: ${interests.join(", ")}
+Decide how to split the ${days} days across the cities — allocate more days to cities that warrant it.
+For each city section, stay strictly within that city only. Do not mix locations between cities.
+Food-first, local-first, walkable clusters. Name exact places, dishes, neighbourhoods.`
+          : `Plan a ${days}-day itinerary for ${city}.
 Pace: ${pace}
 Travelling: ${styleLabel}
 Budget: ${budget || 'mid-range'}
