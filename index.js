@@ -33,7 +33,7 @@ app.use(cors({
   methods: ["GET", "POST"],
 }));
 
-app.use(express.json({ limit: "10kb" }));
+app.use(express.json({ limit: "100kb" }));
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
