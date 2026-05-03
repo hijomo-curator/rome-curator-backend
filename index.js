@@ -22,6 +22,8 @@ const ALLOWED_ORIGINS = [
   "http://localhost:5500",
   "http://127.0.0.1:5500",
   "https://rome-curator-frontend.vercel.app",
+  "https://romecurator.com",
+  "https://www.romecurator.com",
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
@@ -276,11 +278,11 @@ async function sendItineraryEmail({ toEmail, firstName, city, itinerary, travelM
       ${itineraryHtml}
     </div>
     <div style="padding:0 24px 32px;text-align:center;">
-      <a href="https://rome-curator-frontend.vercel.app" style="display:inline-block;background:#B85C38;color:white;text-decoration:none;padding:14px 32px;border-radius:4px;font-size:14px;font-weight:500;letter-spacing:1px;">Plan another trip →</a>
+      <a href="https://romecurator.com" style="display:inline-block;background:#B85C38;color:white;text-decoration:none;padding:14px 32px;border-radius:4px;font-size:14px;font-weight:500;letter-spacing:1px;">Plan another trip →</a>
     </div>
     <div style="background:#1C1410;padding:20px 24px;text-align:center;">
       <p style="color:#7A6355;font-size:11px;margin:0 0 6px;line-height:1.6;">This itinerary was AI-generated and is a starting point. Always verify opening hours, prices, and bookings before your trip.</p>
-      <p style="color:#4A3728;font-size:11px;margin:0;">© 2025 Rome Curator · <a href="https://rome-curator-frontend.vercel.app" style="color:#D4845A;text-decoration:none;">Visit the app</a></p>
+      <p style="color:#4A3728;font-size:11px;margin:0;">© 2025 Rome Curator · <a href="https://romecurator.com" style="color:#D4845A;text-decoration:none;">Visit the app</a></p>
     </div>
   </div>
 </body>
