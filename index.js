@@ -67,10 +67,56 @@ const BUDGET_LABELS = {
   luxury: 'luxury (boutique hotels, fine dining, private experiences, skip-the-line)',
 };
 
+// ── Destination-specific context injected into system prompt ─────
+const DESTINATION_CONTEXT = {
+  // ITALY
+  'Rome': 'Anchor days in Trastevere, Testaccio, Pigneto, Prati — not the tourist triangle. Warn about tourist traps near Trevi and Colosseum. Cacio e pepe, supplì, carbonara, artichokes alla giudia are the food anchors. August means locals flee — adjust accordingly.',
+  'Florence': 'Anchor in Oltrarno and San Frediano — not around the Duomo. Lampredotto, bistecca Fiorentina, schiacciata, Chianti. Warn about tourist-trap restaurants on Piazza della Repubblica. June-August is brutally hot and crowded — mornings only for outdoor sights.',
+  'Amalfi Coast': 'Base in Positano, Ravello, or Praiano — never Amalfi town itself which is too crowded. Limoncello, fresh pasta, grilled fish, local lemons. Ferries beat roads. July-August: arrive before 9am or after 5pm to avoid gridlock. Focus on one area per day — the coast is not a quick drive.',
+  'Sicily': 'Base in Palermo or Catania depending on focus. Arancini, granita, cannoli, pasta alla Norma, street food at Ballarò market. Greek temples in Agrigento, baroque Noto, salt pans near Marsala. Never rush Sicily — distances are deceptive. Avoid August heat in the interior.',
+  // PORTUGAL
+  'Lisbon': 'Anchor in Mouraria, Intendente, LX Factory area — not Bairro Alto which is touristy now. Pastéis de nata at Manteigaria (not Belém), bifanas, ginjinha. Tram 28 is a tourist trap — walk the hills instead. Avoid Belem on weekends.',
+  'Porto': 'Anchor in Bonfim, Cedofeita, Foz do Douro — not Ribeira which is overpriced. Francesinha, tripas à moda do Porto, Super Bock on the go. Wine caves in Vila Nova de Gaia are worth it. Walk the Douro riverbank at sunset. June-July is peak and busy.',
+  // JAPAN
+  'Tokyo': 'Anchor by neighbourhood: Shimokitazawa for vintage/music, Yanaka for old Tokyo, Koenji for subculture, Shinjuku Golden Gai for tiny bars. Ramen, yakitori, tempura, tsukemen, tonkatsu. Avoid Shibuya crossing at peak hours — go at 7am instead. IC card for all transport.',
+  'Kyoto': 'Go to temples at 7am before tour buses. Fushimi Inari at dawn only. Anchor in Higashiyama and Gion for walking. Kaiseki, yudofu, matcha everything, obanzai. October-November and March-April are peak — book 3 months ahead. Avoid Arashiyama on weekends.',
+  'Osaka': 'Dotonbori is for one evening only — rest of the time anchor in Shinsekai, Tenma, Nakazakicho. Takoyaki, okonomiyaki, kushikatsu, negiyaki. Osaka is for eating — budget accordingly. Never double-dip the kushikatsu. Day trip to Nara for deer park.',
+  'Mount Fuji & Hakone': 'Base in Hakone — not at Fuji Five Lakes which is overrun. Ryokan stay with onsen is non-negotiable. Views of Fuji are weather-dependent — have a backup plan. Hakone Open Air Museum is genuinely excellent. Ropeway, Lake Ashi boat, Owakudani in one loop. September-October best for clear Fuji views.',
+  // THAILAND
+  'Bangkok': 'Anchor in Ari, Thonglor, Ekkamai for local life — not Khao San Road. Boat noodles, pad see ew, mango sticky rice, som tam. Tuk tuks are for tourists — use BTS Skytrain and boats. Temple visits require covered shoulders/knees. April is brutally hot (Songkran festival though).',
+  'Chiang Mai': 'Anchor outside the Old City moat — Nimman Road area for cafes, Santitham for local food. Khao soi is non-negotiable. Sunday Walking Street at Wualai is the best market. Doi Suthep at 6am before tour groups. November-February is perfect weather. Avoid burning season March-April.',
+  'Phuket': 'Base in Kata, Kamala, or Surin — never Patong which is pure chaos. Fresh seafood, pad thai, green curry, roti. Sunset at Phromthep Cape. Hire a scooter to escape the crowds. May-October is monsoon but half the price and far fewer tourists.',
+  // INDIA
+  'North Goa': 'STRICT RULE: Stay within North Goa only. Do NOT mix in South Goa or Panjim locations. Anchor in Anjuna, Vagator, Assagao, Morjim, Siolim. Beach shacks for kingfish, pork vindaloo at local joints, bebinca for dessert, feni cocktails. Flea markets at Anjuna Wednesday, Arpora Saturday night. Avoid Calangute and Baga — tourist traps. November-February is peak season.',
+  'South Goa': 'STRICT RULE: Stay within South Goa only. Do NOT mix in North Goa or Panjim locations. Anchor in Palolem, Agonda, Colva, Benaulim. Far quieter and more laid-back than North Goa. Fresh catch at beach shacks, Goan fish curry rice, prawn balchão. Cotigao Wildlife Sanctuary for nature. May-September is monsoon — many places shut.',
+  'Mumbai': 'Anchor by area: Bandra for cafes and nightlife, Colaba for history, Dharavi for reality, Mahalaxmi for local Mumbai. Vada pav, pav bhaji, bhel puri at Chowpatty, Irani chai, keema pav. Local train is essential experience but avoid rush hour (8-10am, 6-8pm). Monsoon July-August transforms the city — dramatic but wet.',
+  // SRI LANKA
+  'Colombo': 'Anchor in Colombo 7 (Cinnamon Gardens), Pettah for chaos and street food, Galle Face for sunsets. Kottu roti, hoppers, string hoppers, lamprais, pol sambol. Tuk tuks negotiate hard — agree price first. June-October is southwest monsoon — wet but manageable.',
+  'Galle': 'The Fort is the anchor — colonial Dutch architecture, boutique stays, excellent restaurants. Stick to the Fort and nearby beaches (Unawatuna, Jungle Beach). Crab curry, fresh tuna, wood apple juice. Walk the Fort ramparts at sunset. December-April is peak and beautiful.',
+  'Kandy': 'Temple of the Tooth is the centrepiece — go for evening puja ceremony. Anchor in the lake area. Kandyan cuisine: mild curries, woodapple, buffalo curd with treacle. Day trip to Pinnawala Elephant Orphanage or Peradeniya Botanical Gardens. August Esala Perahera festival is extraordinary but crowded.',
+  // VIETNAM
+  'Hanoi': 'Anchor in the Old Quarter but sleep on its edges — Hoan Kiem lake area. Bun cha, pho bo, banh mi, egg coffee, bun rieu. Traffic is organised chaos — walk confidently and steadily. Weekend nights: Hoan Kiem pedestrian zone comes alive. October-April is best weather.',
+  'Hoi An': 'The Ancient Town is a UNESCO site — beautiful but heavily touristed. Go at 6am for empty streets. Anchor outside the centre: An Bang Beach area. White rose dumplings, cao lau (only authentic in Hoi An), banh mi Phuong. Hire a bicycle — town is perfectly sized for it. February-July best weather.',
+  'Ho Chi Minh City': 'Anchor in District 1 and District 3 — not District 10 which is residential. Banh mi, hu tieu, broken rice (com tam), fresh spring rolls, ca phe sua da. War Remnants Museum is essential but heavy. Cu Chi Tunnels as a day trip. Grab bikes beat taxis. November-April is dry season.',
+  // KENYA
+  'Nairobi': 'Anchor in Westlands and Karen — not the CBD which feels unsafe for tourists. Nyama choma, ugali, sukuma wiki, Kenyan chai. Giraffe Centre and David Sheldrick Elephant Orphanage are genuinely excellent. Nairobi National Park is 20 minutes from the city centre — unique. Use Bolt/Uber only.',
+  'Maasai Mara': 'July-October for the Great Migration — wildebeest crossing the Mara River. Base at a camp inside or adjacent to the reserve. Bush breakfasts, sundowner drinks, night game drives. Big Five likely in any season. Hot air balloon at dawn is worth the cost. Fly from Nairobi — road is brutal.',
+  'Diani Beach': 'South Coast beach anchored at Diani — white sand, palm trees, reef snorkelling. Fresh grilled fish, coconut rice, Swahili biryani. Shimba Hills day trip for elephant and sable antelope. Colobus monkeys in the trees above the beach. January-March and July-October are best weather.',
+  // SPAIN
+  'Madrid': 'Anchor in Malasaña, Lavapiés, and Chueca — not Gran Via. Bocadillo de calamares, cocido Madrileño, patatas bravas, churros con chocolate at San Ginés. Lunch is at 2-3pm, dinner at 9-10pm — adjust your schedule. El Rastro flea market Sunday mornings. August: half of Madrid leaves — quieter but some places shut.',
+  'Barcelona': 'Anchor in Gràcia, El Born, Poblenou — avoid Las Ramblas completely. Pa amb tomàquet, fideuà, croquetes, vermouth at noon. Sagrada Familia requires advance booking only. Barceloneta beach is mediocre — locals go to Bogatell or Mar Bella. June-August: hot, crowded, and expensive.',
+  'Seville': 'Anchor in Triana and El Arenal — not Santa Cruz which is beautiful but touristy. Pescaíto frito, pringá montadito, gazpacho, manzanilla sherry. Flamenco at Casa de la Memoria (book ahead). Cathedral and Alcázar at opening time only. April (Feria) and May are extraordinary. July-August is brutally hot (45°C+).',
+  // GREECE
+  'Athens': 'Anchor in Monastiraki, Psiri, Exarcheia — not Plaka which is a tourist trap. Souvlaki, spanakopita, loukoumades, fresh seafood in Piraeus. Acropolis at 8am opening — never midday. Sunset from Filopappou Hill beats the expensive rooftop bars. April-June and September-October are perfect.',
+  'Santorini': 'Oia sunset is overhyped and overcrowded — watch from Imerovigli instead. Base in Firostefani or Akrotiri — not Oia which is overpriced. Fresh tomato fritters, fava dip, grilled octopus, Assyrtiko wine. Caldera boat trip to hot springs and volcano. April-May and September-October are ideal — avoid July-August.',
+  'Mykonos': 'Go for beaches and nightlife — not culture (there is very little). Psarou and Elia beaches for daytime. Little Venice for sunset drinks. Hora for evening wandering. Fresh seafood, loukoumades, Greek salad. Nightlife starts at midnight. June-September only — it shuts down in winter. Book everything 3 months ahead in July-August.',
+};
+
 function getSystemPrompt(city, month, travelStyle, budget) {
   const monthName = month ? MONTH_NAMES[month] : null;
   const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle;
   const budgetLabel = BUDGET_LABELS[budget] || budget;
+  const destinationContext = DESTINATION_CONTEXT[city] || '';
 
   const soloFemaleNote = travelStyle === 'solo_female' ? `
 SOLO FEMALE SAFETY RULES:
@@ -95,7 +141,10 @@ FAMILY WITH KIDS RULES:
 - Suggest restaurants that are kid-friendly and relaxed.
 - Build in rest time and don't over-schedule.` : '';
 
-  return `You are the Rome Curator's local expert for ${city} — a deeply knowledgeable friend who has lived in ${city} for years, eats obsessively well, and hates tourist traps.
+  return `You are Rome Curator's local expert for ${city} — a deeply knowledgeable friend who has lived in ${city} for years, eats obsessively well, and hates tourist traps.
+
+DESTINATION KNOWLEDGE — ${city.toUpperCase()}:
+${destinationContext}
 
 TRIP CONTEXT:
 - Travelling: ${styleLabel}
