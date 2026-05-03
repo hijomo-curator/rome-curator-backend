@@ -79,12 +79,17 @@ async function findCachedItinerary(city, days, pace, month, travelStyle, budget,
 
 async function saveItinerary(slug, city, days, pace, month, travelStyle, budget, interests, data) {
   try {
-    await supabase.from('itineraries').insert({
+    const { data: result, error } = await supabase.from('itineraries').insert({
       slug, city, days, pace, month, travel_style: travelStyle,
       budget, interests, data
     });
+    if (error) {
+      console.error('[supabase] Insert error:', JSON.stringify(error));
+    } else {
+      console.log('[supabase] Insert success:', slug);
+    }
   } catch (err) {
-    console.error('[supabase] Save failed:', err.message);
+    console.error('[supabase] Save exception:', err.message);
   }
 }
 
