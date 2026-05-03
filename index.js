@@ -43,11 +43,12 @@ const usageByIP = {};
 
 function getIP(req) { return req.ip || req.connection.remoteAddress || "unknown"; }
 function initUsage(ip) { if (!usageByIP[ip]) usageByIP[ip] = { generations: 0, refinements: 0 }; }
-function getTokenLimit(days) {
-  if (days <= 3) return 2000;
-  if (days <= 5) return 3000;
-  if (days <= 7) return 4000;
-  return 5000;
+function getTokenLimit(days, isMultiCity) {
+  const base = isMultiCity ? 1500 : 0; // multi-city needs extra tokens for complexity
+  if (days <= 3) return 2000 + base;
+  if (days <= 5) return 3000 + base;
+  if (days <= 7) return 4500 + base;
+  return 6000 + base;
 }
 
 const MONTH_NAMES = ['','January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -116,7 +117,14 @@ function getSystemPrompt(city, month, travelStyle, budget) {
   const monthName = month ? MONTH_NAMES[month] : null;
   const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle;
   const budgetLabel = BUDGET_LABELS[budget] || budget;
-  const destinationContext = DESTINATION_CONTEXT[city] || '';
+
+  // Build destination context — handles both single city and "City A and City B and City C"
+  const cityList = city.split(' and ').map(c => c.trim());
+  const destinationContext = cityList
+    .map(c => DESTINATION_CONTEXT[c] ? `${c.toUpperCase()}: ${DESTINATION_CONTEXT[c]}` : '')
+    .filter(Boolean)
+    .join('\n\n')
+    || DESTINATION_CONTEXT[city] || '';
 
   const soloFemaleNote = travelStyle === 'solo_female' ? `
 SOLO FEMALE SAFETY RULES:
@@ -143,7 +151,7 @@ FAMILY WITH KIDS RULES:
 
   return `You are Rome Curator's local expert for ${city} — a deeply knowledgeable friend who has lived in ${city} for years, eats obsessively well, and hates tourist traps.
 
-DESTINATION KNOWLEDGE — ${city.toUpperCase()}:
+DESTINATION KNOWLEDGE:
 ${destinationContext}
 
 TRIP CONTEXT:
@@ -360,8 +368,8 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
 
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-5",
-      max_tokens: getTokenLimit(days),
-      system: getSystemPrompt(isMultiCity ? cities[0] : city, month, travelStyle, budget),
+      max_tokens: getTokenLimit(days, isMultiCity),
+      system: getSystemPrompt(isMultiCity ? cities.join(' and ') : city, month, travelStyle, budget),
       messages: [{
         role: "user",
         content: isMultiCity
