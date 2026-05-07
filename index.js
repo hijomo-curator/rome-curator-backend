@@ -501,6 +501,130 @@ Food-first, local-first, walkable clusters. Name exact places, dishes, neighbour
   }
 });
 
+// ── Generate itinerary (streaming) ───────────────────────────────
+app.post("/generate-itinerary-stream", limiter, async (req, res) => {
+  try {
+    const { city, cities, isMultiCity, days, pace, month, travelStyle, budget, interests } = req.body;
+    const ip = getIP(req);
+    initUsage(ip);
+
+    if (!city || !days || !pace || !Array.isArray(interests) || interests.length === 0) {
+      return res.status(400).json({ error: "Missing required fields." });
+    }
+    if (days < 1 || days > 14) return res.status(400).json({ error: "Days must be between 1 and 14." });
+    if (usageByIP[ip].generations >= MAX_GENERATIONS) {
+      return res.status(429).json({ error: "Generation limit reached. Try again later." });
+    }
+
+    usageByIP[ip].generations += 1;
+    console.log(`[generate-stream] IP: ${ip} | City: ${city} | Days: ${days} | Style: ${travelStyle} | Budget: ${budget} | Count: ${usageByIP[ip].generations}`);
+
+    // ── Cache check (single city only, 6 month window) ────────────
+    if (!isMultiCity) {
+      const cached = await findCachedItinerary(city, days, pace, month, travelStyle, budget, interests);
+      if (cached) {
+        console.log(`[generate-stream] Cache hit | slug: ${cached.slug}`);
+        // For cache hits, stream is unnecessary — send as SSE done event immediately
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.write(`data: ${JSON.stringify({ type: 'done', itinerary: { ...cached.data, slug: cached.slug, fromCache: true } })}\n\n`);
+        return res.end();
+      }
+    }
+
+    const monthName = month ? MONTH_NAMES[month] : null;
+    const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle || 'traveller';
+
+    // ── Set SSE headers ───────────────────────────────────────────
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // ── Stream from Claude ────────────────────────────────────────
+    let rawText = '';
+    const stream = await anthropic.messages.stream({
+      model: "claude-sonnet-4-5",
+      max_tokens: getTokenLimit(days, isMultiCity),
+      system: getSystemPrompt(isMultiCity ? (cities || [city]).join(' and ') : city, month, travelStyle, budget),
+      messages: [{
+        role: "user",
+        content: isMultiCity
+          ? `Plan a ${days}-day multi-city itinerary across ${(cities || [city]).join(', ')} in that order.
+Pace: ${pace}
+Travelling: ${styleLabel}
+Budget: ${budget || 'mid-range'}
+${monthName ? `Travel month: ${monthName}` : ''}
+Interests: ${interests.join(", ")}
+Decide how to split the ${days} days across the cities — allocate more days to cities that warrant it.
+For each city section, stay strictly within that city only. Do not mix locations between cities.
+Food-first, local-first, walkable clusters. Name exact places, dishes, neighbourhoods.`
+          : `Plan a ${days}-day itinerary for ${city}.
+Pace: ${pace}
+Travelling: ${styleLabel}
+Budget: ${budget || 'mid-range'}
+${monthName ? `Travel month: ${monthName}` : ''}
+Interests: ${interests.join(", ")}
+Food-first, local-first, walkable clusters. Name exact places, dishes, neighbourhoods.`,
+      }],
+    });
+
+    // Stream each text chunk to client
+    stream.on('text', (text) => {
+      rawText += text;
+      res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`);
+    });
+
+    // When stream ends, parse JSON and save
+    stream.on('finalMessage', async (message) => {
+      let itinerary;
+      try {
+        const stripped = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
+        const start = stripped.indexOf('{');
+        const end = stripped.lastIndexOf('}');
+        if (start === -1 || end === -1) throw new Error('No JSON found');
+        const clean = stripped.slice(start, end + 1);
+        itinerary = JSON.parse(clean);
+      } catch {
+        console.error("[generate-stream] JSON parse failed:", rawText.slice(0, 300));
+        res.write(`data: ${JSON.stringify({ type: 'error', error: 'Failed to parse itinerary. Please try again.' })}\n\n`);
+        return res.end();
+      }
+
+      console.log(`[generate-stream] Success | Tokens: ${message.usage.input_tokens + message.usage.output_tokens}`);
+
+      // Save to Supabase
+      const slug = generateSlug();
+      await saveItinerary(slug, city, days, pace, month, travelStyle, budget, interests, itinerary);
+      console.log(`[generate-stream] Saved | slug: ${slug}`);
+
+      // Send final parsed itinerary
+      res.write(`data: ${JSON.stringify({ type: 'done', itinerary: { ...itinerary, slug } })}\n\n`);
+      res.end();
+    });
+
+    stream.on('error', (err) => {
+      console.error("[generate-stream] Stream error:", err.message);
+      res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong. Please try again.' })}\n\n`);
+      res.end();
+    });
+
+    // Handle client disconnect
+    req.on('close', () => {
+      console.log('[generate-stream] Client disconnected');
+      stream.abort?.();
+    });
+
+  } catch (err) {
+    console.error("[generate-stream] Error:", err.message);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: "Something went wrong generating your itinerary. Please try again." });
+    }
+    res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong. Please try again.' })}\n\n`);
+    res.end();
+  }
+});
+
 // ── Get itinerary by slug (shareable links) ───────────────────────
 app.get("/itinerary/:slug", async (req, res) => {
   try {
