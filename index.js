@@ -112,12 +112,17 @@ const usageByIP = {};
 
 function getIP(req) { return req.ip || req.connection.remoteAddress || "unknown"; }
 function initUsage(ip) { if (!usageByIP[ip]) usageByIP[ip] = { generations: 0, refinements: 0 }; }
-function getTokenLimit(days, isMultiCity) {
-  const base = isMultiCity ? 1500 : 0; // multi-city needs extra tokens for complexity
-  if (days <= 3) return 2000 + base;
-  if (days <= 5) return 3000 + base;
-  if (days <= 7) return 4500 + base;
-  return 6000 + base;
+function getTokenLimit(days, isMultiCity, cityCount = 1) {
+  // Base token budget scales with duration
+  let base;
+  if (days <= 3)       base = 2500;
+  else if (days <= 5)  base = 3500;
+  else if (days <= 8)  base = 5500;
+  else if (days <= 11) base = 7500;
+  else                 base = 9500; // 12-14 days needs substantial room
+  // Multi-city: +800 tokens per extra city (routing, transitions, day splits)
+  if (isMultiCity && cityCount > 1) base += (cityCount - 1) * 800;
+  return base;
 }
 
 const MONTH_NAMES = ['','January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -182,6 +187,36 @@ const DESTINATION_CONTEXT = {
   'Mykonos': 'Go for beaches and nightlife — not culture (there is very little). Psarou and Elia beaches for daytime. Little Venice for sunset drinks. Hora for evening wandering. Fresh seafood, loukoumades, Greek salad. Nightlife starts at midnight. June-September only — it shuts down in winter. Book everything 3 months ahead in July-August.',
 };
 
+// ── Lite system prompt: single city ≤4 days (saves ~40% input tokens) ──
+function getLiteSystemPrompt(city, month, travelStyle, budget) {
+  const monthName = month ? MONTH_NAMES[month] : null;
+  const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle;
+  const budgetLabel = BUDGET_LABELS[budget] || budget;
+  const destContext = DESTINATION_CONTEXT[city] || '';
+  const soloFemaleNote = travelStyle === 'solo_female' ? 'Prioritise well-lit busy areas for evenings. Add brief safety notes for off-beat spots.' : '';
+  const elderlyNote = travelStyle === 'family_elderly' ? 'Avoid excessive walking/climbing. Prefer accessible venues.' : '';
+  const familyNote = travelStyle === 'family_kids' ? 'One child-friendly activity per day. Keep sights varied, restaurants relaxed.' : '';
+  const specialNote = [soloFemaleNote, elderlyNote, familyNote].filter(Boolean).join(' ');
+  return `You are a local expert for ${city} — a well-travelled friend who hates tourist traps and eats obsessively well.
+
+DESTINATION: ${city}
+${destContext}
+
+TRIP: ${styleLabel} · ${budgetLabel}${monthName ? ` · ${monthName}` : ''}${specialNote ? `\n${specialNote}` : ''}
+
+RULES:
+- Local always beats touristy. Food anchors every day. Name exact places, dishes, streets.
+- Plan in walkable clusters. One iconic landmark per day max. Warn about tourist traps.
+- Match budget strictly. Relaxed pace = fewer stops with more time; packed = efficient routing.
+- Return ONLY valid JSON. No markdown, no text outside the JSON.
+- Every morning/afternoon/evening block: exactly 3 bullet points.
+- Each bullet: name the exact place, what to do/order, and why — one specific sentence.
+- "why" field: exactly 2 sentences explaining the day's curation logic.
+
+Return this exact JSON shape:
+{"title":"short evocative title","meta":"e.g. 3 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":["bullet","bullet","bullet"],"afternoon":["bullet","bullet","bullet"],"evening":["bullet","bullet","bullet"],"why":"2-sentence rationale"}]}`;
+}
+
 function getSystemPrompt(city, month, travelStyle, budget) {
   const monthName = month ? MONTH_NAMES[month] : null;
   const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle;
@@ -241,6 +276,13 @@ CURATION PHILOSOPHY:
 - Off-beat = hidden urban gems, unusual neighbourhoods.
 - Nightlife = bars open late, live music, clubs — distinct from drinks/aperitivo.
 - Adapt to pace: relaxed = fewer things, more lingering; packed = efficient routing, more stops.
+
+MULTI-CITY DAY ALLOCATION (when applicable):
+- Allocate days based on richness of each destination relative to the traveller's interests.
+- Major cultural cities (Rome, Tokyo, Bangkok) warrant 3-4 days. Transit or compact cities (Pisa, Porto) warrant 1-2 days.
+- Never exceed the total number of days requested.
+- Prioritise cities with the most to offer for THIS specific traveller's interests.
+- State day allocation clearly in the meta field e.g. "4 days Rome, 2 days Florence".
 
 HARD RULES:
 - Return ONLY valid JSON. No markdown, no explanation, no text outside the JSON object.
@@ -425,6 +467,7 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
       return res.status(400).json({ error: "Missing required fields." });
     }
     if (days < 1 || days > 14) return res.status(400).json({ error: "Days must be between 1 and 14." });
+    if (!isMultiCity && days > 4) return res.status(400).json({ error: "Single city itineraries are limited to 4 days." });
     if (usageByIP[ip].generations >= MAX_GENERATIONS) {
       return res.status(429).json({ error: "Generation limit reached. Try again later." });
     }
@@ -446,8 +489,8 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
 
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-5",
-      max_tokens: getTokenLimit(days, isMultiCity),
-      system: getSystemPrompt(isMultiCity ? cities.join(' and ') : city, month, travelStyle, budget),
+      max_tokens: getTokenLimit(days, isMultiCity, (cities || [city]).length),
+      system: (!isMultiCity && days <= 4) ? getLiteSystemPrompt(city, month, travelStyle, budget) : getSystemPrompt(isMultiCity ? cities.join(' and ') : city, month, travelStyle, budget),
       messages: [{
         role: "user",
         content: isMultiCity
@@ -512,6 +555,7 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
       return res.status(400).json({ error: "Missing required fields." });
     }
     if (days < 1 || days > 14) return res.status(400).json({ error: "Days must be between 1 and 14." });
+    if (!isMultiCity && days > 4) return res.status(400).json({ error: "Single city itineraries are limited to 4 days." });
     if (usageByIP[ip].generations >= MAX_GENERATIONS) {
       return res.status(429).json({ error: "Generation limit reached. Try again later." });
     }
@@ -545,8 +589,8 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
     let rawText = '';
     const stream = await anthropic.messages.stream({
       model: "claude-sonnet-4-5",
-      max_tokens: getTokenLimit(days, isMultiCity),
-      system: getSystemPrompt(isMultiCity ? (cities || [city]).join(' and ') : city, month, travelStyle, budget),
+      max_tokens: getTokenLimit(days, isMultiCity, (cities || [city]).length),
+      system: (!isMultiCity && days <= 4) ? getLiteSystemPrompt(city, month, travelStyle, budget) : getSystemPrompt(isMultiCity ? (cities || [city]).join(' and ') : city, month, travelStyle, budget),
       messages: [{
         role: "user",
         content: isMultiCity
