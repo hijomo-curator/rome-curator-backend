@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import Anthropic from "@anthropic-ai/sdk";
 import rateLimit from "express-rate-limit";
 import { createClient } from "@supabase/supabase-js";
+import crypto from "crypto";
 
 dotenv.config();
 
@@ -185,6 +186,8 @@ const DESTINATION_CONTEXT = {
   'Athens': 'Anchor in Monastiraki, Psiri, Exarcheia — not Plaka which is a tourist trap. Souvlaki, spanakopita, loukoumades, fresh seafood in Piraeus. Acropolis at 8am opening — never midday. Sunset from Filopappou Hill beats the expensive rooftop bars. April-June and September-October are perfect.',
   'Santorini': 'Oia sunset is overhyped and overcrowded — watch from Imerovigli instead. Base in Firostefani or Akrotiri — not Oia which is overpriced. Fresh tomato fritters, fava dip, grilled octopus, Assyrtiko wine. Caldera boat trip to hot springs and volcano. April-May and September-October are ideal — avoid July-August.',
   'Mykonos': 'Go for beaches and nightlife — not culture (there is very little). Psarou and Elia beaches for daytime. Little Venice for sunset drinks. Hora for evening wandering. Fresh seafood, loukoumades, Greek salad. Nightlife starts at midnight. June-September only — it shuts down in winter. Book everything 3 months ahead in July-August.',
+  // SWEDEN
+  'Stockholm': 'Anchor in Södermalm and Östermalm — not the tourist-heavy Gamla Stan (though it is worth one morning). Smörgåsbord, meatballs with lingonberry, gravlax, cinnamon buns (kanelbulle) from a local konditori, and craft beer from a Söder bar. The archipelago is 30 minutes away by ferry — essential in summer. Djurgården island has three world-class museums in one easy walk. June-August is golden and long-lit; December is dark but hygge-filled with Christmas markets. The T-bana (metro) doubles as an art gallery — buy a 24-hour pass.',
 };
 
 // ── Lite system prompt: single city ≤4 days (saves ~40% input tokens) ──
@@ -488,7 +491,7 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
     const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle || 'traveller';
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-4-6",
       max_tokens: getTokenLimit(days, isMultiCity, (cities || [city]).length),
       system: (!isMultiCity && days <= 4) ? getLiteSystemPrompt(city, month, travelStyle, budget) : getSystemPrompt(isMultiCity ? cities.join(' and ') : city, month, travelStyle, budget),
       messages: [{
@@ -588,7 +591,7 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
     // ── Stream from Claude ────────────────────────────────────────
     let rawText = '';
     const stream = await anthropic.messages.stream({
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-4-6",
       max_tokens: getTokenLimit(days, isMultiCity, (cities || [city]).length),
       system: (!isMultiCity && days <= 4) ? getLiteSystemPrompt(city, month, travelStyle, budget) : getSystemPrompt(isMultiCity ? (cities || [city]).join(' and ') : city, month, travelStyle, budget),
       messages: [{
@@ -701,7 +704,7 @@ app.post("/refine-day", limiter, async (req, res) => {
     console.log(`[refine] IP: ${ip} | City: ${city} | Day: ${day.day} | Count: ${usageByIP[ip].refinements}`);
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-4-6",
       max_tokens: 1200,
       messages: [{
         role: "user",
@@ -729,6 +732,74 @@ app.post("/refine-day", limiter, async (req, res) => {
   } catch (err) {
     console.error("[refine] Error:", err.message);
     return res.status(500).json({ error: "Something went wrong. Please try again." });
+  }
+});
+
+// ── Razorpay: create order ────────────────────────────────────────
+app.post("/create-razorpay-order", limiter, async (req, res) => {
+  try {
+    const { amount, currency = "INR", notes = {} } = req.body;
+    if (!amount || typeof amount !== "number" || amount < 1) {
+      return res.status(400).json({ error: "Invalid amount." });
+    }
+    if (amount > 10000) {
+      return res.status(400).json({ error: "Amount exceeds maximum allowed." });
+    }
+    const RAZORPAY_KEY_ID     = process.env.RAZORPAY_KEY_ID;
+    const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+    if (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET) {
+      console.error("[payment] Razorpay keys not configured.");
+      return res.status(503).json({ error: "Payment not configured. Please try again later." });
+    }
+    const credentials = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString("base64");
+    const response = await fetch("https://api.razorpay.com/v1/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Basic ${credentials}` },
+      body: JSON.stringify({
+        amount: amount * 100,
+        currency,
+        receipt: `rc_donation_${Date.now()}`,
+        notes: { source: "rome_curator_donation", ...notes },
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("[payment] Razorpay order creation failed:", JSON.stringify(data));
+      return res.status(500).json({ error: "Could not create payment order. Please try again." });
+    }
+    console.log(`[payment] Razorpay order created | ID: ${data.id} | Amount: ₹${amount}`);
+    return res.json({ orderId: data.id, amount: data.amount, currency: data.currency, keyId: RAZORPAY_KEY_ID });
+  } catch (err) {
+    console.error("[payment] create-razorpay-order error:", err.message);
+    return res.status(500).json({ error: "Something went wrong. Please try again." });
+  }
+});
+
+// ── Razorpay: verify payment signature ───────────────────────────
+app.post("/verify-razorpay-payment", limiter, async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ error: "Missing payment verification fields." });
+    }
+    const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+    if (!RAZORPAY_KEY_SECRET) {
+      console.error("[payment] Razorpay secret not configured for verification.");
+      return res.status(503).json({ error: "Payment verification unavailable." });
+    }
+    const expectedSignature = crypto
+      .createHmac("sha256", RAZORPAY_KEY_SECRET)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest("hex");
+    if (expectedSignature !== razorpay_signature) {
+      console.error(`[payment] Signature mismatch | Order: ${razorpay_order_id}`);
+      return res.status(400).json({ error: "Payment verification failed. Signature mismatch." });
+    }
+    console.log(`[payment] Payment verified ✓ | Order: ${razorpay_order_id} | Payment: ${razorpay_payment_id}`);
+    return res.json({ success: true, paymentId: razorpay_payment_id });
+  } catch (err) {
+    console.error("[payment] verify-razorpay-payment error:", err.message);
+    return res.status(500).json({ error: "Something went wrong during verification." });
   }
 });
 
