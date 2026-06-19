@@ -107,9 +107,86 @@ async function getItineraryBySlug(slug) {
   }
 }
 
+// ── In-progress generation tracking (for resumability) ─────────────
+// Keyed by client-generated requestId. Stored in-memory (Render single
+// instance, no horizontal scaling) — survives tab-switch/reconnect within
+// the same server process lifetime, which covers the actual failure case.
+const progressByRequestId = {};
+const PROGRESS_TTL_MS = 15 * 60 * 1000; // 15 min — plenty for any generation
+
+function initProgress(requestId, totalDays) {
+  progressByRequestId[requestId] = {
+    days: [],          // completed day objects, in order
+    title: null,
+    meta: null,
+    dayAllocation: null,
+    totalDays,
+    status: 'in_progress', // 'in_progress' | 'done' | 'error'
+    slug: null,
+    error: null,
+    createdAt: Date.now(),
+  };
+}
+
+function appendProgress(requestId, newDays, { title, meta, dayAllocation } = {}) {
+  const p = progressByRequestId[requestId];
+  if (!p) return;
+  p.days.push(...newDays);
+  if (title) p.title = title;
+  if (meta) p.meta = meta;
+  if (dayAllocation) p.dayAllocation = dayAllocation;
+}
+
+function finishProgress(requestId, slug) {
+  const p = progressByRequestId[requestId];
+  if (!p) return;
+  p.status = 'done';
+  p.slug = slug;
+}
+
+function errorProgress(requestId, message) {
+  const p = progressByRequestId[requestId];
+  if (!p) return;
+  p.status = 'error';
+  p.error = message;
+}
+
+// Periodic cleanup of stale progress entries
+setInterval(() => {
+  const now = Date.now();
+  for (const id of Object.keys(progressByRequestId)) {
+    if (now - progressByRequestId[id].createdAt > PROGRESS_TTL_MS) {
+      delete progressByRequestId[id];
+    }
+  }
+}, 5 * 60 * 1000);
+
 const MAX_GENERATIONS = 5;
 const MAX_REFINEMENTS = 10;
 const usageByIP = {};
+
+// ── Trip shape limits — mirrors frontend enforceDaysCap/onCityCheckboxChange ──
+const MAX_CITIES = 4;
+const MAX_DAYS_SINGLE = 4;
+const MAX_DAYS_MULTI = 10;
+const MIN_DAYS_MULTI = 6;    // 2-3 cities
+const MIN_DAYS_4_CITY = 9;   // 4 cities — 9 days / 8 nights, ~2 nights per city floor
+
+// Returns an error string if the trip shape is invalid, otherwise null.
+function validateTripShape({ isMultiCity, days, cities, city }) {
+  if (days < 1 || days > MAX_DAYS_MULTI) {
+    return `Days must be between 1 and ${MAX_DAYS_MULTI}.`;
+  }
+  if (!isMultiCity) {
+    if (days > MAX_DAYS_SINGLE) return `Single city itineraries are limited to ${MAX_DAYS_SINGLE} days.`;
+    return null;
+  }
+  const cityCount = (cities || (city ? city.split(' and ') : [])).length;
+  if (cityCount > MAX_CITIES) return `Multi-city trips are limited to ${MAX_CITIES} cities.`;
+  const minDays = cityCount >= MAX_CITIES ? MIN_DAYS_4_CITY : MIN_DAYS_MULTI;
+  if (days < minDays) return `A ${cityCount}-city trip needs at least ${minDays} days.`;
+  return null;
+}
 
 function getIP(req) { return req.ip || req.connection.remoteAddress || "unknown"; }
 function initUsage(ip) { if (!usageByIP[ip]) usageByIP[ip] = { generations: 0, refinements: 0 }; }
@@ -119,11 +196,32 @@ function getTokenLimit(days, isMultiCity, cityCount = 1) {
   if (days <= 3)       base = 2500;
   else if (days <= 5)  base = 3500;
   else if (days <= 8)  base = 5500;
-  else if (days <= 11) base = 7500;
-  else                 base = 9500; // 12-14 days needs substantial room
+  else                 base = 7500; // 9-10 days
   // Multi-city: +800 tokens per extra city (routing, transitions, day splits)
   if (isMultiCity && cityCount > 1) base += (cityCount - 1) * 800;
   return base;
+}
+
+// ── Chunking: split a day count into batches of ≤4 days ───────────
+// e.g. 10 -> [4, 4, 2] | 8 -> [4, 4] | 6 -> [4, 2] | 3 -> [3]
+const MAX_DAYS_PER_CHUNK = 4;
+function getDayChunks(totalDays) {
+  const chunks = [];
+  let remaining = totalDays;
+  while (remaining > 0) {
+    const take = Math.min(MAX_DAYS_PER_CHUNK, remaining);
+    chunks.push(take);
+    remaining -= take;
+  }
+  return chunks; // array of day-counts per chunk
+}
+
+// ── Token limit for a single chunk (not the whole trip) ───────────
+function getChunkTokenLimit(chunkDays, isMultiCity, cityCount = 1) {
+  // Roughly proportional to a 1-4 day single-call budget, with small overhead per day
+  let base = 900 + chunkDays * 700; // ~1 day:1600, 4 days:3700
+  if (isMultiCity && cityCount > 1) base += (cityCount - 1) * 400;
+  return Math.min(base, 5000); // safety ceiling per chunk
 }
 
 const MONTH_NAMES = ['','January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -295,6 +393,71 @@ HARD RULES:
 
 Return this exact JSON shape:
 {"title":"short evocative title","meta":"e.g. 4 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":["bullet","bullet","bullet"],"afternoon":["bullet","bullet","bullet"],"evening":["bullet","bullet","bullet"],"why":"2-sentence rationale"}]}`;
+}
+
+// ── Build a short recap of prior chunks to avoid repeats ──────────
+// Pulls out place names mentioned so far (rough heuristic: first few
+// words of each bullet before a comma/dash) — kept compact to stay cheap.
+function buildRecap(priorDays) {
+  if (!priorDays || priorDays.length === 0) return '';
+  const lines = priorDays.map(d => {
+    const allBullets = [...(d.morning || []), ...(d.afternoon || []), ...(d.evening || [])];
+    const places = allBullets.map(b => b.split(/[,–—-]/)[0].trim()).filter(Boolean);
+    return `Day ${d.day} (${d.title || ''}): ${places.join('; ')}`;
+  });
+  return lines.join('\n');
+}
+
+// ── Build the user-turn instruction for one chunk of a longer trip ─
+// chunkStartDay/chunkEndDay are 1-indexed inclusive day numbers within
+// the FULL trip (not the chunk's own numbering).
+function buildChunkUserMessage({
+  city, cities, isMultiCity, totalDays, chunkStartDay, chunkEndDay,
+  pace, month, travelStyle, budget, interests, priorDays, dayAllocation,
+}) {
+  const monthName = month ? MONTH_NAMES[month] : null;
+  const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle;
+  const recap = buildRecap(priorDays);
+  const isFirstChunk = chunkStartDay === 1;
+  const chunkDayCount = chunkEndDay - chunkStartDay + 1;
+
+  const baseContext = `Pace: ${pace}
+Travelling: ${styleLabel}
+Budget: ${budget || 'mid-range'}
+${monthName ? `Travel month: ${monthName}` : ''}
+Interests: ${interests.join(", ")}
+Food-first, local-first, walkable clusters. Name exact places, dishes, neighbourhoods.`;
+
+  if (isMultiCity) {
+    const cityNames = (cities || [city]).join(', ');
+    if (isFirstChunk) {
+      return `Plan days ${chunkStartDay}-${chunkEndDay} of a ${totalDays}-day multi-city itinerary across ${cityNames} (in that order).
+${baseContext}
+This is the FIRST chunk. Before writing days, decide the full day allocation across ALL ${totalDays} days for all cities (e.g. "4 days Rome, 3 days Florence, 3 days Venice") and state it in the "meta" field — this allocation will guide later chunks, so commit to it now and do not revisit it.
+Only WRITE OUT days ${chunkStartDay} to ${chunkEndDay} in the "days" array (day numbers ${chunkStartDay}-${chunkEndDay} only). Stay strictly within the correct city for each day per your allocation.`;
+    }
+    return `Continue the SAME ${totalDays}-day multi-city itinerary across ${cityNames}. This is a later chunk.
+${baseContext}
+Day allocation already decided: ${dayAllocation || '(see prior days for city boundaries)'}.
+Already generated so far (do not repeat these places, dishes, or neighbourhoods):
+${recap}
+
+Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only) in the "days" array, continuing in the correct city per the allocation. Keep the SAME "title" as before conceptually but you don't need to repeat the full title/meta fields — just return {"days":[...]} for this chunk's days only.`;
+  }
+
+  // Single-city chunked (only relevant if single-city days ever exceed MAX_DAYS_PER_CHUNK;
+  // currently single-city is capped at 4 so this path is rarely hit, but kept for safety).
+  if (isFirstChunk) {
+    return `Plan days ${chunkStartDay}-${chunkEndDay} of a ${totalDays}-day itinerary for ${city}.
+${baseContext}
+Only write days ${chunkStartDay} to ${chunkEndDay} in the "days" array.`;
+  }
+  return `Continue the SAME ${totalDays}-day itinerary for ${city}. This is a later chunk.
+${baseContext}
+Already generated so far (do not repeat these places, dishes, or neighbourhoods):
+${recap}
+
+Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only) — just return {"days":[...]} for this chunk's days only.`;
 }
 
 // ── Save email to Google Sheets via Sheetdb ───────────────────────
@@ -469,8 +632,8 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
     if (!city || !days || !pace || !Array.isArray(interests) || interests.length === 0) {
       return res.status(400).json({ error: "Missing required fields." });
     }
-    if (days < 1 || days > 14) return res.status(400).json({ error: "Days must be between 1 and 14." });
-    if (!isMultiCity && days > 4) return res.status(400).json({ error: "Single city itineraries are limited to 4 days." });
+    const tripError = validateTripShape({ isMultiCity, days, cities, city });
+    if (tripError) return res.status(400).json({ error: tripError });
     if (usageByIP[ip].generations >= MAX_GENERATIONS) {
       return res.status(429).json({ error: "Generation limit reached. Try again later." });
     }
@@ -547,31 +710,32 @@ Food-first, local-first, walkable clusters. Name exact places, dishes, neighbour
   }
 });
 
-// ── Generate itinerary (streaming) ───────────────────────────────
+// ── Generate itinerary (streaming, chunked for >4 days) ────────────
 app.post("/generate-itinerary-stream", limiter, async (req, res) => {
+  let requestId; // declared outside try so the catch-all can reference it safely
   try {
     const { city, cities, isMultiCity, days, pace, month, travelStyle, budget, interests } = req.body;
+    requestId = req.body.requestId; // client-generated, used for resumability lookups
     const ip = getIP(req);
     initUsage(ip);
 
     if (!city || !days || !pace || !Array.isArray(interests) || interests.length === 0) {
       return res.status(400).json({ error: "Missing required fields." });
     }
-    if (days < 1 || days > 14) return res.status(400).json({ error: "Days must be between 1 and 14." });
-    if (!isMultiCity && days > 4) return res.status(400).json({ error: "Single city itineraries are limited to 4 days." });
+    const tripError = validateTripShape({ isMultiCity, days, cities, city });
+    if (tripError) return res.status(400).json({ error: tripError });
     if (usageByIP[ip].generations >= MAX_GENERATIONS) {
       return res.status(429).json({ error: "Generation limit reached. Try again later." });
     }
 
     usageByIP[ip].generations += 1;
-    console.log(`[generate-stream] IP: ${ip} | City: ${city} | Days: ${days} | Style: ${travelStyle} | Budget: ${budget} | Count: ${usageByIP[ip].generations}`);
+    console.log(`[generate-stream] IP: ${ip} | City: ${city} | Days: ${days} | Style: ${travelStyle} | Budget: ${budget} | Count: ${usageByIP[ip].generations} | requestId: ${requestId || 'none'}`);
 
     // ── Cache check (single city only, 6 month window) ────────────
     if (!isMultiCity) {
       const cached = await findCachedItinerary(city, days, pace, month, travelStyle, budget, interests);
       if (cached) {
         console.log(`[generate-stream] Cache hit | slug: ${cached.slug}`);
-        // For cache hits, stream is unnecessary — send as SSE done event immediately
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
@@ -580,96 +744,224 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
       }
     }
 
-    const monthName = month ? MONTH_NAMES[month] : null;
-    const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle || 'traveller';
+    const cityNamesArr = cities || [city];
+    const dayChunks = getDayChunks(days); // e.g. [4,4,2] for 10 days; [3] for 3 days
+    const useChunking = dayChunks.length > 1;
+
+    if (requestId) initProgress(requestId, days);
 
     // ── Set SSE headers ───────────────────────────────────────────
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    // ── Stream from Claude ────────────────────────────────────────
-    let rawText = '';
-    const stream = await anthropic.messages.stream({
-      model: "claude-sonnet-4-6",
-      max_tokens: getTokenLimit(days, isMultiCity, (cities || [city]).length),
-      system: (!isMultiCity && days <= 4) ? getLiteSystemPrompt(city, month, travelStyle, budget) : getSystemPrompt(isMultiCity ? (cities || [city]).join(' and ') : city, month, travelStyle, budget),
-      messages: [{
-        role: "user",
-        content: isMultiCity
-          ? `Plan a ${days}-day multi-city itinerary across ${(cities || [city]).join(', ')} in that order.
-Pace: ${pace}
-Travelling: ${styleLabel}
-Budget: ${budget || 'mid-range'}
-${monthName ? `Travel month: ${monthName}` : ''}
-Interests: ${interests.join(", ")}
-Decide how to split the ${days} days across the cities — allocate more days to cities that warrant it.
-For each city section, stay strictly within that city only. Do not mix locations between cities.
-Food-first, local-first, walkable clusters. Name exact places, dishes, neighbourhoods.`
-          : `Plan a ${days}-day itinerary for ${city}.
-Pace: ${pace}
-Travelling: ${styleLabel}
-Budget: ${budget || 'mid-range'}
-${monthName ? `Travel month: ${monthName}` : ''}
-Interests: ${interests.join(", ")}
-Food-first, local-first, walkable clusters. Name exact places, dishes, neighbourhoods.`,
-      }],
-    });
+    let clientDisconnected = false;
+    req.on('close', () => { clientDisconnected = true; });
 
-    // Stream each text chunk to client
-    stream.on('text', (text) => {
-      rawText += text;
-      res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`);
-    });
+    // ── Non-chunked path (≤4 days, the common case) — unchanged behaviour ──
+    if (!useChunking) {
+      let rawText = '';
+      const stream = await anthropic.messages.stream({
+        model: "claude-sonnet-4-6",
+        max_tokens: getTokenLimit(days, isMultiCity, cityNamesArr.length),
+        system: (!isMultiCity && days <= 4) ? getLiteSystemPrompt(city, month, travelStyle, budget) : getSystemPrompt(isMultiCity ? cityNamesArr.join(' and ') : city, month, travelStyle, budget),
+        messages: [{
+          role: "user",
+          content: buildChunkUserMessage({
+            city, cities: cityNamesArr, isMultiCity, totalDays: days,
+            chunkStartDay: 1, chunkEndDay: days,
+            pace, month, travelStyle, budget, interests, priorDays: [], dayAllocation: null,
+          }),
+        }],
+      });
 
-    // When stream ends, parse JSON and save
-    stream.on('finalMessage', async (message) => {
-      let itinerary;
-      try {
-        const stripped = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
-        const start = stripped.indexOf('{');
-        const end = stripped.lastIndexOf('}');
-        if (start === -1 || end === -1) throw new Error('No JSON found');
-        const clean = stripped.slice(start, end + 1);
-        itinerary = JSON.parse(clean);
-      } catch {
-        console.error("[generate-stream] JSON parse failed:", rawText.slice(0, 300));
-        res.write(`data: ${JSON.stringify({ type: 'error', error: 'Failed to parse itinerary. Please try again.' })}\n\n`);
-        return res.end();
+      stream.on('text', (text) => {
+        rawText += text;
+        if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`);
+      });
+
+      stream.on('finalMessage', async (message) => {
+        let itinerary;
+        try {
+          const stripped = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
+          const start = stripped.indexOf('{');
+          const end = stripped.lastIndexOf('}');
+          if (start === -1 || end === -1) throw new Error('No JSON found');
+          itinerary = JSON.parse(stripped.slice(start, end + 1));
+        } catch {
+          console.error("[generate-stream] JSON parse failed:", rawText.slice(0, 300));
+          if (requestId) errorProgress(requestId, 'Failed to parse itinerary.');
+          if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'error', error: 'Failed to parse itinerary. Please try again.' })}\n\n`);
+          return res.end();
+        }
+
+        console.log(`[generate-stream] Success | Tokens: ${message.usage.input_tokens + message.usage.output_tokens}`);
+        const slug = generateSlug();
+        await saveItinerary(slug, city, days, pace, month, travelStyle, budget, interests, itinerary);
+        console.log(`[generate-stream] Saved | slug: ${slug}`);
+        if (requestId) {
+          appendProgress(requestId, itinerary.days || [], { title: itinerary.title, meta: itinerary.meta });
+          finishProgress(requestId, slug);
+        }
+        if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'done', itinerary: { ...itinerary, slug } })}\n\n`);
+        res.end();
+      });
+
+      stream.on('error', (err) => {
+        console.error("[generate-stream] Stream error:", err.message);
+        if (requestId) errorProgress(requestId, err.message);
+        if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong. Please try again.' })}\n\n`);
+        res.end();
+      });
+
+      // NOTE: deliberately NOT aborting the Claude stream on client disconnect.
+      // The generation keeps running server-side so progress is saved and the
+      // frontend can recover it via /itinerary-progress/:requestId on reconnect
+      // (covers the tab-switch case for short trips too, not just chunked ones).
+      return;
+    }
+
+    // ── Chunked path (>4 days, always multi-city) ──────────────────
+    let allDays = [];
+    let finalTitle = null;
+    let finalMeta = null;
+    let dayAllocation = null;
+    let dayCursor = 0; // days completed so far across chunks
+    let totalTokensUsed = 0;
+
+    try {
+      for (let i = 0; i < dayChunks.length; i++) {
+        const chunkDayCount = dayChunks[i];
+        const chunkStartDay = dayCursor + 1;
+        const chunkEndDay = dayCursor + chunkDayCount;
+        const isFirstChunk = i === 0;
+
+        const systemPromptText = getSystemPrompt(cityNamesArr.join(' and '), month, travelStyle, budget);
+
+        let rawText = '';
+        const stream = await anthropic.messages.stream({
+          model: "claude-sonnet-4-6",
+          max_tokens: getChunkTokenLimit(chunkDayCount, isMultiCity, cityNamesArr.length),
+          // Cache the static system prompt across chunks of the SAME request —
+          // chunks fire seconds apart, well within the 5-minute ephemeral cache window.
+          system: [{ type: "text", text: systemPromptText, cache_control: { type: "ephemeral" } }],
+          messages: [{
+            role: "user",
+            content: buildChunkUserMessage({
+              city, cities: cityNamesArr, isMultiCity, totalDays: days,
+              chunkStartDay, chunkEndDay, pace, month, travelStyle, budget, interests,
+              priorDays: allDays, dayAllocation,
+            }),
+          }],
+        });
+
+        stream.on('text', (text) => {
+          rawText += text;
+          if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`);
+        });
+
+        const finalMessage = await new Promise((resolve, reject) => {
+          stream.on('finalMessage', resolve);
+          stream.on('error', reject);
+        });
+
+        totalTokensUsed += finalMessage.usage.input_tokens + finalMessage.usage.output_tokens;
+        if (finalMessage.usage.cache_read_input_tokens) {
+          console.log(`[generate-stream] Chunk ${i + 1}/${dayChunks.length} cache hit | cached tokens: ${finalMessage.usage.cache_read_input_tokens}`);
+        }
+
+        let parsedChunk;
+        try {
+          const stripped = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
+          const start = stripped.indexOf('{');
+          const end = stripped.lastIndexOf('}');
+          if (start === -1 || end === -1) throw new Error('No JSON found');
+          parsedChunk = JSON.parse(stripped.slice(start, end + 1));
+        } catch {
+          console.error(`[generate-stream] Chunk ${i + 1} JSON parse failed:`, rawText.slice(0, 300));
+          throw new Error('Failed to parse part of the itinerary.');
+        }
+
+        const chunkDays = (parsedChunk.days || []).map((d, idx) => ({ ...d, day: chunkStartDay + idx }));
+        if (chunkDays.length !== chunkDayCount) {
+          console.warn(`[generate-stream] Chunk ${i + 1} expected ${chunkDayCount} days, got ${chunkDays.length}`);
+        }
+        allDays = allDays.concat(chunkDays);
+        if (isFirstChunk) {
+          finalTitle = parsedChunk.title || finalTitle;
+          finalMeta = parsedChunk.meta || finalMeta;
+          dayAllocation = parsedChunk.meta || null; // meta carries the day-allocation statement
+        }
+
+        if (requestId) appendProgress(requestId, chunkDays, { title: finalTitle, meta: finalMeta, dayAllocation });
+
+        // Let the frontend render this chunk's days immediately
+        if (!clientDisconnected) {
+          res.write(`data: ${JSON.stringify({
+            type: 'chunk_done',
+            days: chunkDays,
+            chunkIndex: i,
+            totalChunks: dayChunks.length,
+            daysCompleted: chunkEndDay,
+            totalDays: days,
+          })}\n\n`);
+        }
+
+        dayCursor = chunkEndDay;
       }
 
-      console.log(`[generate-stream] Success | Tokens: ${message.usage.input_tokens + message.usage.output_tokens}`);
+      console.log(`[generate-stream] Chunked success | Total tokens across ${dayChunks.length} chunks: ${totalTokensUsed}`);
 
-      // Save to Supabase
+      const itinerary = { title: finalTitle, meta: finalMeta, days: allDays };
       const slug = generateSlug();
       await saveItinerary(slug, city, days, pace, month, travelStyle, budget, interests, itinerary);
       console.log(`[generate-stream] Saved | slug: ${slug}`);
 
-      // Send final parsed itinerary
-      res.write(`data: ${JSON.stringify({ type: 'done', itinerary: { ...itinerary, slug } })}\n\n`);
+      if (requestId) finishProgress(requestId, slug);
+      if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'done', itinerary: { ...itinerary, slug } })}\n\n`);
       res.end();
-    });
 
-    stream.on('error', (err) => {
-      console.error("[generate-stream] Stream error:", err.message);
-      res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong. Please try again.' })}\n\n`);
+    } catch (err) {
+      console.error("[generate-stream] Chunked generation error:", err.message);
+      if (requestId) errorProgress(requestId, err.message);
+      if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong generating part of your itinerary. Please try again.' })}\n\n`);
       res.end();
-    });
-
-    // Handle client disconnect
-    req.on('close', () => {
-      console.log('[generate-stream] Client disconnected');
-      stream.abort?.();
-    });
+    }
 
   } catch (err) {
     console.error("[generate-stream] Error:", err.message);
+    if (requestId) errorProgress(requestId, err.message);
     if (!res.headersSent) {
       return res.status(500).json({ error: "Something went wrong generating your itinerary. Please try again." });
     }
     res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong. Please try again.' })}\n\n`);
     res.end();
   }
+});
+
+// ── Resume/check progress for an in-flight or completed generation ─
+// Frontend polls this if the SSE stream connection breaks (tab-switch,
+// network blip) so it can recover already-generated days instead of
+// restarting the whole itinerary from scratch.
+app.get("/itinerary-progress/:requestId", (req, res) => {
+  const { requestId } = req.params;
+  if (!requestId || requestId.length > 100) {
+    return res.status(400).json({ error: "Invalid request ID." });
+  }
+  const progress = progressByRequestId[requestId];
+  if (!progress) {
+    return res.status(404).json({ error: "No progress found for this request." });
+  }
+  return res.json({
+    status: progress.status,
+    days: progress.days,
+    title: progress.title,
+    meta: progress.meta,
+    totalDays: progress.totalDays,
+    daysCompleted: progress.days.length,
+    slug: progress.slug,
+    error: progress.error,
+  });
 });
 
 // ── Get itinerary by slug (shareable links) ───────────────────────
