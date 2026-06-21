@@ -761,7 +761,9 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
     // ── Non-chunked path (≤4 days, the common case) — unchanged behaviour ──
     if (!useChunking) {
       let rawText = '';
-      const stream = await anthropic.messages.stream({
+      // Same fix as the chunked path below: .stream() must not be awaited —
+      // attach listeners in the same tick the request is created.
+      const stream = anthropic.messages.stream({
         model: "claude-sonnet-4-6",
         max_tokens: getTokenLimit(days, isMultiCity, cityNamesArr.length),
         system: (!isMultiCity && days <= 4) ? getLiteSystemPrompt(city, month, travelStyle, budget) : getSystemPrompt(isMultiCity ? cityNamesArr.join(' and ') : city, month, travelStyle, budget),
@@ -773,14 +775,18 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
             pace, month, travelStyle, budget, interests, priorDays: [], dayAllocation: null,
           }),
         }],
-      });
-
-      stream.on('text', (text) => {
+      }).on('text', (text) => {
         rawText += text;
         if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`);
+      }).on('error', (err) => {
+        console.error("[generate-stream] Stream error event:", err.message);
+        if (requestId) errorProgress(requestId, err.message);
+        if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong. Please try again.' })}\n\n`);
+        if (!res.writableEnded) res.end();
       });
 
-      stream.on('finalMessage', async (message) => {
+      try {
+        const message = await stream.finalMessage();
         let itinerary;
         try {
           const stripped = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
@@ -792,7 +798,8 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
           console.error("[generate-stream] JSON parse failed:", rawText.slice(0, 300));
           if (requestId) errorProgress(requestId, 'Failed to parse itinerary.');
           if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'error', error: 'Failed to parse itinerary. Please try again.' })}\n\n`);
-          return res.end();
+          if (!res.writableEnded) res.end();
+          return;
         }
 
         console.log(`[generate-stream] Success | Tokens: ${message.usage.input_tokens + message.usage.output_tokens}`);
@@ -804,15 +811,18 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
           finishProgress(requestId, slug);
         }
         if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'done', itinerary: { ...itinerary, slug } })}\n\n`);
-        res.end();
-      });
-
-      stream.on('error', (err) => {
-        console.error("[generate-stream] Stream error:", err.message);
+        if (!res.writableEnded) res.end();
+      } catch (err) {
+        // finalMessage() rejects here if the stream errored — the 'error'
+        // listener above already wrote the SSE error event and ended the
+        // response, so this just prevents an unhandled rejection.
+        console.error("[generate-stream] finalMessage() rejected:", err.message);
         if (requestId) errorProgress(requestId, err.message);
-        if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong. Please try again.' })}\n\n`);
-        res.end();
-      });
+        if (!res.writableEnded) {
+          if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong. Please try again.' })}\n\n`);
+          res.end();
+        }
+      }
 
       // NOTE: deliberately NOT aborting the Claude stream on client disconnect.
       // The generation keeps running server-side so progress is saved and the
@@ -839,7 +849,14 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
         const systemPromptText = getSystemPrompt(cityNamesArr.join(' and '), month, travelStyle, budget);
 
         let rawText = '';
-        const stream = await anthropic.messages.stream({
+        // IMPORTANT: .stream() returns the MessageStream object synchronously —
+        // it must NOT be awaited. The request starts the moment .stream() is
+        // called, so listeners need to attach immediately in the same tick.
+        // Awaiting it (as a previous version of this code did) creates a race:
+        // if an early connection error fires before .on('error', ...) attaches,
+        // the SDK's own unhandled-rejection safety net can fire instead, which
+        // can surface upstream as a confusing ERR_STREAM_PREMATURE_CLOSE.
+        const stream = anthropic.messages.stream({
           model: "claude-sonnet-4-6",
           max_tokens: getChunkTokenLimit(chunkDayCount, isMultiCity, cityNamesArr.length),
           // Cache the static system prompt across chunks of the SAME request —
@@ -853,17 +870,14 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
               priorDays: allDays, dayAllocation,
             }),
           }],
-        });
-
-        stream.on('text', (text) => {
+        }).on('text', (text) => {
           rawText += text;
           if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`);
+        }).on('error', (err) => {
+          console.error(`[generate-stream] Chunk ${i + 1} stream error event:`, err.message);
         });
 
-        const finalMessage = await new Promise((resolve, reject) => {
-          stream.on('finalMessage', resolve);
-          stream.on('error', reject);
-        });
+        const finalMessage = await stream.finalMessage();
 
         totalTokensUsed += finalMessage.usage.input_tokens + finalMessage.usage.output_tokens;
         if (finalMessage.usage.cache_read_input_tokens) {
