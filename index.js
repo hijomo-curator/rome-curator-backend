@@ -5,6 +5,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import rateLimit from "express-rate-limit";
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
+import https from "https";
 
 dotenv.config();
 
@@ -44,7 +45,24 @@ app.use(cors({
 
 app.use(express.json({ limit: "100kb" }));
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// The SDK's default HTTP agent reuses (keep-alive) TCP/TLS connections across
+// requests for speed. Across our back-to-back chunk calls — fired seconds
+// apart from a long-lived Render instance to api.anthropic.com — a pooled
+// connection can go stale (closed server/network-side without the client
+// agent noticing) and the next request on it fails as a generic
+// ERR_STREAM_PREMATURE_CLOSE / AnthropicError with no HTTP status at all,
+// which matches exactly what we were seeing in Render logs. Disabling
+// keep-alive forces a fresh connection per request — costs a small amount
+// of extra TLS handshake time (tens of ms), which is negligible against our
+// 15-30+ second generation calls, in exchange for eliminating this failure
+// class entirely.
+const anthropicAgent = new https.Agent({ keepAlive: false });
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  httpAgent: anthropicAgent,
+  timeout: 120000, // 2 min per request — generous for a single chunk call, fails fast if something's truly stuck
+  maxRetries: 1,   // SDK-level retry as a second layer under our own application-level retry
+});
 
 // ── Supabase helpers ──────────────────────────────────────────────
 function generateSlug() {
