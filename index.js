@@ -189,17 +189,33 @@ const MAX_DAYS_SINGLE = 4;
 const MAX_DAYS_MULTI = 10;
 const MIN_DAYS_MULTI = 6;    // 2-3 cities
 const MIN_DAYS_4_CITY = 9;   // 4 cities — 9 days / 8 nights, ~2 nights per city floor
+const MAX_INTERESTS_UNIVERSAL = 5;  // "Your interests" — independent cap, mirrors frontend
+const MAX_SPECIALS_PER_CITY = 2;    // each city's specials — own independent cap, additive across cities
 
 // Returns an error string if the trip shape is invalid, otherwise null.
-function validateTripShape({ isMultiCity, days, cities, city }) {
+// NOTE: the interests array arrives as a flat list of strings with no
+// tag distinguishing "universal" from "city special" or which city a
+// special belongs to (the frontend doesn't send that structure). So the
+// most we can validate server-side is the worst-case ceiling: 5 universal
+// + 2 per selected city. This can't catch someone sending 5 universal-looking
+// values that are actually all city specials for one city, but it does
+// catch any genuinely excessive payload, and the real enforcement (which
+// chip can be active at all) lives in the frontend's per-scope caps.
+function validateTripShape({ isMultiCity, days, cities, city, interests }) {
   if (days < 1 || days > MAX_DAYS_MULTI) {
     return `Days must be between 1 and ${MAX_DAYS_MULTI}.`;
+  }
+  const cityCount = isMultiCity ? (cities || (city ? city.split(' and ') : [])).length : 1;
+  if (Array.isArray(interests)) {
+    const maxInterests = MAX_INTERESTS_UNIVERSAL + (cityCount * MAX_SPECIALS_PER_CITY);
+    if (interests.length > maxInterests) {
+      return `Please select at most ${maxInterests} interests for a ${cityCount}-city trip.`;
+    }
   }
   if (!isMultiCity) {
     if (days > MAX_DAYS_SINGLE) return `Single city itineraries are limited to ${MAX_DAYS_SINGLE} days.`;
     return null;
   }
-  const cityCount = (cities || (city ? city.split(' and ') : [])).length;
   if (cityCount > MAX_CITIES) return `Multi-city trips are limited to ${MAX_CITIES} cities.`;
   const minDays = cityCount >= MAX_CITIES ? MIN_DAYS_4_CITY : MIN_DAYS_MULTI;
   if (days < minDays) return `A ${cityCount}-city trip needs at least ${minDays} days.`;
@@ -460,7 +476,7 @@ Day allocation already decided: ${dayAllocation || '(see prior days for city bou
 Already generated so far (do not repeat these places, dishes, or neighbourhoods):
 ${recap}
 
-Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only) in the "days" array, continuing in the correct city per the allocation. Keep the SAME "title" as before conceptually but you don't need to repeat the full title/meta fields — just return {"days":[...]} for this chunk's days only.`;
+Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only), continuing in the correct city per the allocation. Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 bullets), "afternoon" (3 bullets), "evening" (3 bullets), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
   }
 
   // Single-city chunked (only relevant if single-city days ever exceed MAX_DAYS_PER_CHUNK;
@@ -475,7 +491,7 @@ ${baseContext}
 Already generated so far (do not repeat these places, dishes, or neighbourhoods):
 ${recap}
 
-Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only) — just return {"days":[...]} for this chunk's days only.`;
+Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only). Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 bullets), "afternoon" (3 bullets), "evening" (3 bullets), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
 }
 
 // ── Save email to Google Sheets via Sheetdb ───────────────────────
@@ -650,7 +666,7 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
     if (!city || !days || !pace || !Array.isArray(interests) || interests.length === 0) {
       return res.status(400).json({ error: "Missing required fields." });
     }
-    const tripError = validateTripShape({ isMultiCity, days, cities, city });
+    const tripError = validateTripShape({ isMultiCity, days, cities, city, interests });
     if (tripError) return res.status(400).json({ error: tripError });
     if (usageByIP[ip].generations >= MAX_GENERATIONS) {
       return res.status(429).json({ error: "Generation limit reached. Try again later." });
@@ -790,7 +806,7 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
     if (!city || !days || !pace || !Array.isArray(interests) || interests.length === 0) {
       return res.status(400).json({ error: "Missing required fields." });
     }
-    const tripError = validateTripShape({ isMultiCity, days, cities, city });
+    const tripError = validateTripShape({ isMultiCity, days, cities, city, interests });
     if (tripError) return res.status(400).json({ error: tripError });
     if (usageByIP[ip].generations >= MAX_GENERATIONS) {
       return res.status(429).json({ error: "Generation limit reached. Try again later." });
@@ -936,7 +952,18 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
           throw new Error('Failed to parse part of the itinerary.');
         }
 
-        const chunkDays = (parsedChunk.days || []).map((d, idx) => ({ ...d, day: chunkStartDay + idx }));
+        const chunkDays = (parsedChunk.days || []).map((d, idx) => {
+          if (!d.why) console.warn(`[generate-stream] Chunk ${i + 1} day ${chunkStartDay + idx} missing "why" field`);
+          return {
+            ...d,
+            day: chunkStartDay + idx,
+            title: d.title || `Day ${chunkStartDay + idx}`,
+            why: d.why || '',
+            morning: d.morning || [],
+            afternoon: d.afternoon || [],
+            evening: d.evening || [],
+          };
+        });
         if (chunkDays.length !== chunkDayCount) {
           console.warn(`[generate-stream] Chunk ${i + 1} expected ${chunkDayCount} days, got ${chunkDays.length}`);
         }
