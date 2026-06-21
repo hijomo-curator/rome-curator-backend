@@ -710,6 +710,56 @@ Food-first, local-first, walkable clusters. Name exact places, dishes, neighbour
   }
 });
 
+// Pulls out the useful diagnostic fields from an Anthropic SDK error,
+// regardless of whether it's an APIStatusError, APIConnectionError, or a
+// generic Node stream error (e.g. ERR_STREAM_PREMATURE_CLOSE). Logged on
+// every chunk failure so a real cause is visible in Render logs instead
+// of just the generic "Premature close" message.
+function describeAnthropicError(err) {
+  const parts = [`name=${err?.constructor?.name || typeof err}`, `message=${err?.message}`];
+  if (err?.status) parts.push(`status=${err.status}`);
+  if (err?.error) parts.push(`apiError=${JSON.stringify(err.error)}`);
+  if (err?.code) parts.push(`code=${err.code}`);
+  const requestId = err?.headers?.['request-id'] || err?.requestID;
+  if (requestId) parts.push(`requestId=${requestId}`);
+  return parts.join(' | ');
+}
+
+// ── Call Claude for one chunk, with retry on transient stream failures ──
+// .stream() must NOT be awaited — it returns the MessageStream object
+// synchronously and the request starts immediately, so listeners need to
+// attach in the same tick (see describeAnthropicError comment above for why
+// this matters for error visibility).
+async function streamChunkWithRetry({ systemPromptText, userMessage, maxTokens, chunkLabel, onText, maxAttempts = 2 }) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let rawText = '';
+    try {
+      const stream = anthropic.messages.stream({
+        model: "claude-sonnet-4-6",
+        max_tokens: maxTokens,
+        system: [{ type: "text", text: systemPromptText, cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: userMessage }],
+      }).on('text', (text) => {
+        rawText += text;
+        onText(text);
+      }).on('error', (err) => {
+        console.error(`[generate-stream] ${chunkLabel} stream error event (attempt ${attempt}):`, describeAnthropicError(err));
+      });
+
+      const finalMessage = await stream.finalMessage();
+      return { finalMessage, rawText };
+    } catch (err) {
+      lastErr = err;
+      console.error(`[generate-stream] ${chunkLabel} attempt ${attempt}/${maxAttempts} failed:`, describeAnthropicError(err));
+      if (attempt < maxAttempts) {
+        await new Promise(r => setTimeout(r, 800 * attempt)); // small backoff: 800ms, 1600ms...
+      }
+    }
+  }
+  throw lastErr;
+}
+
 // ── Generate itinerary (streaming, chunked for >4 days) ────────────
 app.post("/generate-itinerary-stream", limiter, async (req, res) => {
   let requestId; // declared outside try so the catch-all can reference it safely
@@ -758,35 +808,26 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
     let clientDisconnected = false;
     req.on('close', () => { clientDisconnected = true; });
 
-    // ── Non-chunked path (≤4 days, the common case) — unchanged behaviour ──
+    // ── Non-chunked path (≤4 days, the common case) ─────────────────
     if (!useChunking) {
-      let rawText = '';
-      // Same fix as the chunked path below: .stream() must not be awaited —
-      // attach listeners in the same tick the request is created.
-      const stream = anthropic.messages.stream({
-        model: "claude-sonnet-4-6",
-        max_tokens: getTokenLimit(days, isMultiCity, cityNamesArr.length),
-        system: (!isMultiCity && days <= 4) ? getLiteSystemPrompt(city, month, travelStyle, budget) : getSystemPrompt(isMultiCity ? cityNamesArr.join(' and ') : city, month, travelStyle, budget),
-        messages: [{
-          role: "user",
-          content: buildChunkUserMessage({
-            city, cities: cityNamesArr, isMultiCity, totalDays: days,
-            chunkStartDay: 1, chunkEndDay: days,
-            pace, month, travelStyle, budget, interests, priorDays: [], dayAllocation: null,
-          }),
-        }],
-      }).on('text', (text) => {
-        rawText += text;
-        if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`);
-      }).on('error', (err) => {
-        console.error("[generate-stream] Stream error event:", err.message);
-        if (requestId) errorProgress(requestId, err.message);
-        if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong. Please try again.' })}\n\n`);
-        if (!res.writableEnded) res.end();
+      const systemPromptText = (!isMultiCity && days <= 4)
+        ? getLiteSystemPrompt(city, month, travelStyle, budget)
+        : getSystemPrompt(isMultiCity ? cityNamesArr.join(' and ') : city, month, travelStyle, budget);
+      const userMessage = buildChunkUserMessage({
+        city, cities: cityNamesArr, isMultiCity, totalDays: days,
+        chunkStartDay: 1, chunkEndDay: days,
+        pace, month, travelStyle, budget, interests, priorDays: [], dayAllocation: null,
       });
 
       try {
-        const message = await stream.finalMessage();
+        const { finalMessage: message, rawText } = await streamChunkWithRetry({
+          systemPromptText,
+          userMessage,
+          maxTokens: getTokenLimit(days, isMultiCity, cityNamesArr.length),
+          chunkLabel: 'Single-call',
+          onText: (text) => { if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`); },
+        });
+
         let itinerary;
         try {
           const stripped = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
@@ -813,10 +854,9 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
         if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'done', itinerary: { ...itinerary, slug } })}\n\n`);
         if (!res.writableEnded) res.end();
       } catch (err) {
-        // finalMessage() rejects here if the stream errored — the 'error'
-        // listener above already wrote the SSE error event and ended the
-        // response, so this just prevents an unhandled rejection.
-        console.error("[generate-stream] finalMessage() rejected:", err.message);
+        // streamChunkWithRetry already retried once and logged full detail —
+        // this is the final failure after retries are exhausted.
+        console.error("[generate-stream] Single-call generation failed after retries:", describeAnthropicError(err));
         if (requestId) errorProgress(requestId, err.message);
         if (!res.writableEnded) {
           if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong. Please try again.' })}\n\n`);
@@ -847,37 +887,19 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
         const isFirstChunk = i === 0;
 
         const systemPromptText = getSystemPrompt(cityNamesArr.join(' and '), month, travelStyle, budget);
-
-        let rawText = '';
-        // IMPORTANT: .stream() returns the MessageStream object synchronously —
-        // it must NOT be awaited. The request starts the moment .stream() is
-        // called, so listeners need to attach immediately in the same tick.
-        // Awaiting it (as a previous version of this code did) creates a race:
-        // if an early connection error fires before .on('error', ...) attaches,
-        // the SDK's own unhandled-rejection safety net can fire instead, which
-        // can surface upstream as a confusing ERR_STREAM_PREMATURE_CLOSE.
-        const stream = anthropic.messages.stream({
-          model: "claude-sonnet-4-6",
-          max_tokens: getChunkTokenLimit(chunkDayCount, isMultiCity, cityNamesArr.length),
-          // Cache the static system prompt across chunks of the SAME request —
-          // chunks fire seconds apart, well within the 5-minute ephemeral cache window.
-          system: [{ type: "text", text: systemPromptText, cache_control: { type: "ephemeral" } }],
-          messages: [{
-            role: "user",
-            content: buildChunkUserMessage({
-              city, cities: cityNamesArr, isMultiCity, totalDays: days,
-              chunkStartDay, chunkEndDay, pace, month, travelStyle, budget, interests,
-              priorDays: allDays, dayAllocation,
-            }),
-          }],
-        }).on('text', (text) => {
-          rawText += text;
-          if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`);
-        }).on('error', (err) => {
-          console.error(`[generate-stream] Chunk ${i + 1} stream error event:`, err.message);
+        const userMessage = buildChunkUserMessage({
+          city, cities: cityNamesArr, isMultiCity, totalDays: days,
+          chunkStartDay, chunkEndDay, pace, month, travelStyle, budget, interests,
+          priorDays: allDays, dayAllocation,
         });
 
-        const finalMessage = await stream.finalMessage();
+        const { finalMessage, rawText } = await streamChunkWithRetry({
+          systemPromptText,
+          userMessage,
+          maxTokens: getChunkTokenLimit(chunkDayCount, isMultiCity, cityNamesArr.length),
+          chunkLabel: `Chunk ${i + 1}/${dayChunks.length}`,
+          onText: (text) => { if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'chunk', text })}\n\n`); },
+        });
 
         totalTokensUsed += finalMessage.usage.input_tokens + finalMessage.usage.output_tokens;
         if (finalMessage.usage.cache_read_input_tokens) {
@@ -936,7 +958,7 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
       res.end();
 
     } catch (err) {
-      console.error("[generate-stream] Chunked generation error:", err.message);
+      console.error("[generate-stream] Chunked generation failed after retries:", describeAnthropicError(err));
       if (requestId) errorProgress(requestId, err.message);
       if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'error', error: 'Something went wrong generating part of your itinerary. Please try again.' })}\n\n`);
       res.end();
