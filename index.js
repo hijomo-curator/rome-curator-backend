@@ -72,7 +72,7 @@ function generateSlug() {
 
 const CACHE_MONTHS = 6;
 
-async function findCachedItinerary(city, days, pace, month, travelStyle, budget, interests) {
+async function findCachedItinerary(city, days, pace, month, travelStyle, budget, foodPreference, interests) {
   try {
     const cutoff = new Date();
     cutoff.setMonth(cutoff.getMonth() - CACHE_MONTHS);
@@ -85,6 +85,7 @@ async function findCachedItinerary(city, days, pace, month, travelStyle, budget,
       .eq('month', month)
       .eq('travel_style', travelStyle)
       .eq('budget', budget)
+      .eq('food_preference', foodPreference)
       .contains('interests', interests)
       .gte('created_at', cutoff.toISOString())
       .order('created_at', { ascending: false })
@@ -96,11 +97,11 @@ async function findCachedItinerary(city, days, pace, month, travelStyle, budget,
   }
 }
 
-async function saveItinerary(slug, city, days, pace, month, travelStyle, budget, interests, data) {
+async function saveItinerary(slug, city, days, pace, month, travelStyle, budget, foodPreference, interests, data) {
   try {
     const { data: result, error } = await supabase.from('itineraries').insert({
       slug, city, days, pace, month, travel_style: travelStyle,
-      budget, interests, data
+      budget, food_preference: foodPreference, interests, data
     });
     if (error) {
       console.error('[supabase] Insert error:', JSON.stringify(error));
@@ -275,6 +276,32 @@ const BUDGET_LABELS = {
   luxury: 'luxury (boutique hotels, fine dining, private experiences, skip-the-line)',
 };
 
+// ── Food preference: dietary directive injected into every prompt ──
+const VALID_FOOD_PREFERENCES = ['any', 'vegetarian', 'vegan', 'non_veg'];
+function normalizeFoodPreference(fp) {
+  return VALID_FOOD_PREFERENCES.includes(fp) ? fp : 'any';
+}
+
+const FOOD_PREFERENCE_LABELS = {
+  any: 'no dietary restriction',
+  vegetarian: 'vegetarian',
+  vegan: 'vegan',
+  non_veg: 'no restriction — especially enjoys meat and seafood',
+};
+
+function getFoodPreferenceDirective(foodPreference) {
+  switch (foodPreference) {
+    case 'vegetarian':
+      return `\nDIETARY REQUIREMENT — VEGETARIAN: every food recommendation (restaurants, street food, dishes) must be vegetarian. No meat, poultry, or fish/seafood dishes anywhere, in any meal. If the destination's signature food culture leans heavily on meat or seafood, actively find and name the best vegetarian-friendly spots and dishes instead of skipping the food anchor for that day.`;
+    case 'vegan':
+      return `\nDIETARY REQUIREMENT — VEGAN: every food recommendation must be fully vegan — no meat, fish, dairy, eggs, or honey. Where a well-known local dish needs a modification to be vegan, say so explicitly (e.g. "order it without the yoghurt topping"). If the destination isn't naturally vegan-friendly, actively find the best vegan-friendly spots rather than dropping the food anchor for that day.`;
+    case 'non_veg':
+      return `\nDIETARY PREFERENCE — NON-VEGETARIAN FOCUS: this traveller especially enjoys meat and seafood. Prioritise the destination's best meat and seafood dishes and restaurants as the food anchor wherever it fits the local cuisine.`;
+    default:
+      return ''; // 'any' — no dietary constraint, existing behaviour unchanged
+  }
+}
+
 // ── Destination-specific context injected into system prompt ─────
 const DESTINATION_CONTEXT = {
   // ITALY
@@ -323,7 +350,7 @@ const DESTINATION_CONTEXT = {
 };
 
 // ── Lite system prompt: single city ≤4 days (saves ~40% input tokens) ──
-function getLiteSystemPrompt(city, month, travelStyle, budget) {
+function getLiteSystemPrompt(city, month, travelStyle, budget, foodPreference) {
   const monthName = month ? MONTH_NAMES[month] : null;
   const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle;
   const budgetLabel = BUDGET_LABELS[budget] || budget;
@@ -332,12 +359,13 @@ function getLiteSystemPrompt(city, month, travelStyle, budget) {
   const elderlyNote = travelStyle === 'family_elderly' ? 'Avoid excessive walking/climbing. Prefer accessible venues.' : '';
   const familyNote = travelStyle === 'family_kids' ? 'One child-friendly activity per day. Keep sights varied, restaurants relaxed.' : '';
   const specialNote = [soloFemaleNote, elderlyNote, familyNote].filter(Boolean).join(' ');
+  const foodNote = getFoodPreferenceDirective(foodPreference);
   return `You are a local expert for ${city} — a well-travelled friend who hates tourist traps and eats obsessively well.
 
 DESTINATION: ${city}
 ${destContext}
 
-TRIP: ${styleLabel} · ${budgetLabel}${monthName ? ` · ${monthName}` : ''}${specialNote ? `\n${specialNote}` : ''}
+TRIP: ${styleLabel} · ${budgetLabel}${monthName ? ` · ${monthName}` : ''}${specialNote ? `\n${specialNote}` : ''}${foodNote}
 
 RULES:
 - Local always beats touristy. Food anchors every day. Name exact places, dishes, streets.
@@ -352,10 +380,11 @@ Return this exact JSON shape:
 {"title":"short evocative title","meta":"e.g. 3 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":["bullet","bullet","bullet"],"afternoon":["bullet","bullet","bullet"],"evening":["bullet","bullet","bullet"],"why":"2-sentence rationale"}]}`;
 }
 
-function getSystemPrompt(city, month, travelStyle, budget) {
+function getSystemPrompt(city, month, travelStyle, budget, foodPreference) {
   const monthName = month ? MONTH_NAMES[month] : null;
   const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle;
   const budgetLabel = BUDGET_LABELS[budget] || budget;
+  const foodNote = getFoodPreferenceDirective(foodPreference);
 
   // Build destination context — handles both single city and "City A and City B and City C"
   const cityList = city.split(' and ').map(c => c.trim());
@@ -397,7 +426,7 @@ TRIP CONTEXT:
 - Travelling: ${styleLabel}
 - Budget: ${budgetLabel}
 ${monthName ? `- Travel month: ${monthName} — factor in seasonal weather, crowds, local events, and what's open or closed.` : ''}
-${soloFemaleNote}${elderlyNote}${familyNote}
+${soloFemaleNote}${elderlyNote}${familyNote}${foodNote}
 
 CURATION PHILOSOPHY:
 - Local always beats touristy. Iconic landmarks only if they carry genuine human historical/cultural significance.
@@ -447,17 +476,19 @@ function buildRecap(priorDays) {
 // the FULL trip (not the chunk's own numbering).
 function buildChunkUserMessage({
   city, cities, isMultiCity, totalDays, chunkStartDay, chunkEndDay,
-  pace, month, travelStyle, budget, interests, priorDays, dayAllocation,
+  pace, month, travelStyle, budget, foodPreference, interests, priorDays, dayAllocation,
 }) {
   const monthName = month ? MONTH_NAMES[month] : null;
   const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle;
   const recap = buildRecap(priorDays);
   const isFirstChunk = chunkStartDay === 1;
   const chunkDayCount = chunkEndDay - chunkStartDay + 1;
+  const foodPrefLabel = FOOD_PREFERENCE_LABELS[foodPreference] || FOOD_PREFERENCE_LABELS.any;
 
   const baseContext = `Pace: ${pace}
 Travelling: ${styleLabel}
 Budget: ${budget || 'mid-range'}
+Dietary preference: ${foodPrefLabel}
 ${monthName ? `Travel month: ${monthName}` : ''}
 Interests: ${interests.join(", ")}
 Food-first, local-first, walkable clusters. Name exact places, dishes, neighbourhoods.`;
@@ -659,7 +690,8 @@ app.post("/save-email", limiter, async (req, res) => {
 // ── Generate itinerary ────────────────────────────────────────────
 app.post("/generate-itinerary", limiter, async (req, res) => {
   try {
-    const { city, cities, isMultiCity, days, pace, month, travelStyle, budget, interests } = req.body;
+    const { city, cities, isMultiCity, days, pace, month, travelStyle, budget, foodPreference: foodPreferenceRaw, interests } = req.body;
+    const foodPreference = normalizeFoodPreference(foodPreferenceRaw);
     const ip = getIP(req);
     initUsage(ip);
 
@@ -673,11 +705,11 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
     }
 
     usageByIP[ip].generations += 1;
-    console.log(`[generate] IP: ${ip} | City: ${city} | Days: ${days} | Style: ${travelStyle} | Budget: ${budget} | Count: ${usageByIP[ip].generations}`);
+    console.log(`[generate] IP: ${ip} | City: ${city} | Days: ${days} | Style: ${travelStyle} | Budget: ${budget} | Food: ${foodPreference} | Count: ${usageByIP[ip].generations}`);
 
     // ── Cache check (single city only, 6 month window) ────────────
     if (!isMultiCity) {
-      const cached = await findCachedItinerary(city, days, pace, month, travelStyle, budget, interests);
+      const cached = await findCachedItinerary(city, days, pace, month, travelStyle, budget, foodPreference, interests);
       if (cached) {
         console.log(`[generate] Cache hit | slug: ${cached.slug}`);
         return res.json({ ...cached.data, slug: cached.slug, fromCache: true });
@@ -686,11 +718,12 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
 
     const monthName = month ? MONTH_NAMES[month] : null;
     const styleLabel = TRAVEL_STYLE_LABELS[travelStyle] || travelStyle || 'traveller';
+    const foodPrefLabel = FOOD_PREFERENCE_LABELS[foodPreference] || FOOD_PREFERENCE_LABELS.any;
 
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: getTokenLimit(days, isMultiCity, (cities || [city]).length),
-      system: (!isMultiCity && days <= 4) ? getLiteSystemPrompt(city, month, travelStyle, budget) : getSystemPrompt(isMultiCity ? cities.join(' and ') : city, month, travelStyle, budget),
+      system: (!isMultiCity && days <= 4) ? getLiteSystemPrompt(city, month, travelStyle, budget, foodPreference) : getSystemPrompt(isMultiCity ? cities.join(' and ') : city, month, travelStyle, budget, foodPreference),
       messages: [{
         role: "user",
         content: isMultiCity
@@ -698,6 +731,7 @@ app.post("/generate-itinerary", limiter, async (req, res) => {
 Pace: ${pace}
 Travelling: ${styleLabel}
 Budget: ${budget || 'mid-range'}
+Dietary preference: ${foodPrefLabel}
 ${monthName ? `Travel month: ${monthName}` : ''}
 Interests: ${interests.join(", ")}
 Decide how to split the ${days} days across the cities — allocate more days to cities that warrant it.
@@ -707,6 +741,7 @@ Food-first, local-first, walkable clusters. Name exact places, dishes, neighbour
 Pace: ${pace}
 Travelling: ${styleLabel}
 Budget: ${budget || 'mid-range'}
+Dietary preference: ${foodPrefLabel}
 ${monthName ? `Travel month: ${monthName}` : ''}
 Interests: ${interests.join(", ")}
 Food-first, local-first, walkable clusters. Name exact places, dishes, neighbourhoods.`,
@@ -733,7 +768,7 @@ Food-first, local-first, walkable clusters. Name exact places, dishes, neighbour
 
     // ── Save to Supabase ──────────────────────────────────────────
     const slug = generateSlug();
-    await saveItinerary(slug, city, days, pace, month, travelStyle, budget, interests, itinerary);
+    await saveItinerary(slug, city, days, pace, month, travelStyle, budget, foodPreference, interests, itinerary);
     console.log(`[generate] Saved | slug: ${slug}`);
 
     return res.json({ ...itinerary, slug });
@@ -798,7 +833,8 @@ async function streamChunkWithRetry({ systemPromptText, userMessage, maxTokens, 
 app.post("/generate-itinerary-stream", limiter, async (req, res) => {
   let requestId; // declared outside try so the catch-all can reference it safely
   try {
-    const { city, cities, isMultiCity, days, pace, month, travelStyle, budget, interests } = req.body;
+    const { city, cities, isMultiCity, days, pace, month, travelStyle, budget, foodPreference: foodPreferenceRaw, interests } = req.body;
+    const foodPreference = normalizeFoodPreference(foodPreferenceRaw);
     requestId = req.body.requestId; // client-generated, used for resumability lookups
     const ip = getIP(req);
     initUsage(ip);
@@ -813,11 +849,11 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
     }
 
     usageByIP[ip].generations += 1;
-    console.log(`[generate-stream] IP: ${ip} | City: ${city} | Days: ${days} | Style: ${travelStyle} | Budget: ${budget} | Count: ${usageByIP[ip].generations} | requestId: ${requestId || 'none'}`);
+    console.log(`[generate-stream] IP: ${ip} | City: ${city} | Days: ${days} | Style: ${travelStyle} | Budget: ${budget} | Food: ${foodPreference} | Count: ${usageByIP[ip].generations} | requestId: ${requestId || 'none'}`);
 
     // ── Cache check (single city only, 6 month window) ────────────
     if (!isMultiCity) {
-      const cached = await findCachedItinerary(city, days, pace, month, travelStyle, budget, interests);
+      const cached = await findCachedItinerary(city, days, pace, month, travelStyle, budget, foodPreference, interests);
       if (cached) {
         console.log(`[generate-stream] Cache hit | slug: ${cached.slug}`);
         res.setHeader('Content-Type', 'text/event-stream');
@@ -845,12 +881,12 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
     // ── Non-chunked path (≤4 days, the common case) ─────────────────
     if (!useChunking) {
       const systemPromptText = (!isMultiCity && days <= 4)
-        ? getLiteSystemPrompt(city, month, travelStyle, budget)
-        : getSystemPrompt(isMultiCity ? cityNamesArr.join(' and ') : city, month, travelStyle, budget);
+        ? getLiteSystemPrompt(city, month, travelStyle, budget, foodPreference)
+        : getSystemPrompt(isMultiCity ? cityNamesArr.join(' and ') : city, month, travelStyle, budget, foodPreference);
       const userMessage = buildChunkUserMessage({
         city, cities: cityNamesArr, isMultiCity, totalDays: days,
         chunkStartDay: 1, chunkEndDay: days,
-        pace, month, travelStyle, budget, interests, priorDays: [], dayAllocation: null,
+        pace, month, travelStyle, budget, foodPreference, interests, priorDays: [], dayAllocation: null,
       });
 
       try {
@@ -879,7 +915,7 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
 
         console.log(`[generate-stream] Success | Tokens: ${message.usage.input_tokens + message.usage.output_tokens}`);
         const slug = generateSlug();
-        await saveItinerary(slug, city, days, pace, month, travelStyle, budget, interests, itinerary);
+        await saveItinerary(slug, city, days, pace, month, travelStyle, budget, foodPreference, interests, itinerary);
         console.log(`[generate-stream] Saved | slug: ${slug}`);
         if (requestId) {
           appendProgress(requestId, itinerary.days || [], { title: itinerary.title, meta: itinerary.meta });
@@ -920,10 +956,10 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
         const chunkEndDay = dayCursor + chunkDayCount;
         const isFirstChunk = i === 0;
 
-        const systemPromptText = getSystemPrompt(cityNamesArr.join(' and '), month, travelStyle, budget);
+        const systemPromptText = getSystemPrompt(cityNamesArr.join(' and '), month, travelStyle, budget, foodPreference);
         const userMessage = buildChunkUserMessage({
           city, cities: cityNamesArr, isMultiCity, totalDays: days,
-          chunkStartDay, chunkEndDay, pace, month, travelStyle, budget, interests,
+          chunkStartDay, chunkEndDay, pace, month, travelStyle, budget, foodPreference, interests,
           priorDays: allDays, dayAllocation,
         });
 
@@ -995,7 +1031,7 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
 
       const itinerary = { title: finalTitle, meta: finalMeta, days: allDays };
       const slug = generateSlug();
-      await saveItinerary(slug, city, days, pace, month, travelStyle, budget, interests, itinerary);
+      await saveItinerary(slug, city, days, pace, month, travelStyle, budget, foodPreference, interests, itinerary);
       console.log(`[generate-stream] Saved | slug: ${slug}`);
 
       if (requestId) finishProgress(requestId, slug);
