@@ -186,7 +186,7 @@ const usageByIP = {};
 
 // ── Trip shape limits — mirrors frontend enforceDaysCap/onCityCheckboxChange ──
 const MAX_CITIES = 4;
-const MAX_DAYS_SINGLE = 4;
+const MAX_DAYS_SINGLE = 7;
 const MAX_DAYS_MULTI = 10;
 const MIN_DAYS_MULTI = 6;    // 2-3 cities
 const MIN_DAYS_4_CITY = 9;   // 4 cities — 9 days / 8 nights, ~2 nights per city floor
@@ -302,6 +302,21 @@ function getFoodPreferenceDirective(foodPreference) {
   }
 }
 
+// ── Traveller safety & wellbeing guardrails — GLOBAL, applies to every
+// destination. These exist because "local beats touristy" curation, left
+// unchecked, can push toward genuinely unsafe or unwise recommendations
+// for a traveller with no local context to fall back on. This overrides
+// the authenticity bias, not the other way around.
+const SAFETY_GUARDRAILS = `
+TRAVELLER SAFETY & WELLBEING — THESE RULES OVERRIDE "LOCAL BEATS TOURISTY":
+- Never recommend independently walking, eating, or exploring inside informal settlements, slums, or comparable low-income informal urban areas (e.g. Dharavi in Mumbai, favelas in Rio de Janeiro or São Paulo) — regardless of how authentic, "real," or photogenic the experience is. If a reputable, established guided-tour operator exists for that area, you may mention it as an optional GUIDED add-on only — never as a self-guided activity, and never as the day's anchor.
+- Never recommend a specific food vendor, stall, or restaurant located inside an informal settlement/slum, for the same reason — no exceptions, however famous it is locally.
+- For religious or spiritual sites: only recommend major, securely managed heritage/tourist sites with established visitor infrastructure (e.g. a protected monument). Avoid recommending active community religious sites in contexts with real communal or religious tension, even if historically or architecturally significant — the risk isn't the site itself, it's a traveller unknowingly walking into local social tension they have no context to navigate.
+- Only name a specific small/independent food vendor, stall, or hole-in-the-wall if you have genuine confidence it is a real, long-established, well-regarded local institution — never invent a plausible-sounding specific name just to sound authentic. If you're not confident a specific place is real and well-regarded, describe the TYPE of place and area instead of fabricating a name (e.g. "a well-known breakfast spot near the station" rather than naming one you're unsure of).
+- These rules apply regardless of budget level or how highly an "authentic, local" recommendation would otherwise score — traveller safety and health always take priority over authenticity.`;
+
+const SAFETY_GUARDRAILS_LITE = `- SAFETY OVERRIDE (non-negotiable): never recommend self-guided access to informal settlements/slums (e.g. Dharavi, favelas) — guided tours only, never the day's anchor, and never a food vendor inside one. For religious sites, only recommend securely managed heritage/tourist sites, not community sites with religious-tension risk. Only name specific small vendors you're genuinely confident are real, established, well-regarded places — otherwise describe the type of place rather than inventing a name.`;
+
 // ── Destination-specific context injected into system prompt ─────
 const DESTINATION_CONTEXT = {
   // ITALY
@@ -324,7 +339,7 @@ const DESTINATION_CONTEXT = {
   // INDIA
   'North Goa': 'STRICT RULE: Stay within North Goa only. Do NOT mix in South Goa or Panjim locations. Anchor in Anjuna, Vagator, Assagao, Morjim, Siolim. Beach shacks for kingfish, pork vindaloo at local joints, bebinca for dessert, feni cocktails. Flea markets at Anjuna Wednesday, Arpora Saturday night. Avoid Calangute and Baga — tourist traps. November-February is peak season.',
   'South Goa': 'STRICT RULE: Stay within South Goa only. Do NOT mix in North Goa or Panjim locations. Anchor in Palolem, Agonda, Colva, Benaulim. Far quieter and more laid-back than North Goa. Fresh catch at beach shacks, Goan fish curry rice, prawn balchão. Cotigao Wildlife Sanctuary for nature. May-September is monsoon — many places shut.',
-  'Mumbai': 'Anchor by area: Bandra for cafes and nightlife, Colaba for history, Dharavi for reality, Mahalaxmi for local Mumbai. Vada pav, pav bhaji, bhel puri at Chowpatty, Irani chai, keema pav. Local train is essential experience but avoid rush hour (8-10am, 6-8pm). Monsoon July-August transforms the city — dramatic but wet.',
+  'Mumbai': 'Anchor by area: Bandra for cafes and nightlife, Colaba for history, Fort/CST for colonial architecture, Mahalaxmi for local Mumbai. Vada pav, pav bhaji, bhel puri at Chowpatty, Irani chai, keema pav — only name specific stalls/joints you are confident are genuinely well-established local institutions, never an invented-sounding street stall. Local train is essential experience but avoid rush hour (8-10am, 6-8pm). SAFETY NOTE (see global rules above): do not recommend Dharavi as a self-guided walking destination or food stop under any framing — if mentioned at all, only as an optional guided tour with a reputable operator, never the day\'s anchor. Do not recommend Haji Ali Dargah or its food stalls at all, regardless of popularity. Monsoon July-August transforms the city — dramatic but wet.',
   'Pune': 'Pune\'s old city (Sadashiv Peth, Shaniwar Wada) carries genuine Peshwa-era history, often overlooked by IT-crowd visitors sticking to Koregaon Park. Sinhagad Fort just outside the city is a popular but genuinely worthwhile morning trek with valley views. Pune\'s food scene is fiercely proud and distinct — misal pav, Bakarwadi, and Puneri-style breakfast at Bedekar or Vaishali are the anchors, not just Mumbai spillover food. October-February is the most pleasant weather; April-May gets very hot.',
   'Alibaug': 'Alibaug is Mumbai\'s weekend escape, but skip the crowded main beach in favour of Kihim, Nagaon, or Varsoli. Kolaba Fort is only accessible by foot at low tide — check timings before you go, it\'s a genuinely atmospheric walk. Farmhouse stays outside the main town offer a quieter alternative to hotels. Fresh Konkani seafood (surmai, pomfret, bombil fry) is the food anchor. November-February is ideal; monsoon (June-September) is dramatic with rough seas but many places stay open, being a monsoon-getaway spot too.',
   'Matheran': 'Matheran is one of the few genuinely vehicle-free hill stations in India — everything is on foot or horseback, and the red laterite soil trails are part of the experience. Skip the crowded main market viewpoints (Echo Point) for quieter spots like Louisa Point or Monkey Point at sunset. The narrow-gauge toy train from Neral is scenic but slow — worth it once. Simple Maharashtrian home food and Parsi-style snacks (a legacy of old colonial visitors) are available in the small market. October-June is accessible; the toy train often suspends service during peak monsoon (July-August) due to landslide risk.',
@@ -394,6 +409,7 @@ RULES:
 - Local always beats touristy. Food anchors every day. Name exact places, dishes, streets.
 - Plan in walkable clusters. One iconic landmark per day max. Warn about tourist traps.
 - Match budget strictly. Relaxed pace = fewer stops with more time; packed = efficient routing.
+${SAFETY_GUARDRAILS_LITE}
 - Return ONLY valid JSON. No markdown, no text outside the JSON.
 - Every morning/afternoon/evening block: exactly 3 bullet points.
 - Each bullet: name the exact place, what to do/order, and why — one specific sentence.
@@ -450,6 +466,7 @@ TRIP CONTEXT:
 - Budget: ${budgetLabel}
 ${monthName ? `- Travel month: ${monthName} — factor in seasonal weather, crowds, local events, and what's open or closed.` : ''}
 ${soloFemaleNote}${elderlyNote}${familyNote}${foodNote}
+${SAFETY_GUARDRAILS}
 
 CURATION PHILOSOPHY:
 - Local always beats touristy. Iconic landmarks only if they carry genuine human historical/cultural significance.
@@ -533,8 +550,9 @@ ${recap}
 Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only), continuing in the correct city per the allocation. Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 bullets), "afternoon" (3 bullets), "evening" (3 bullets), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
   }
 
-  // Single-city chunked (only relevant if single-city days ever exceed MAX_DAYS_PER_CHUNK;
-  // currently single-city is capped at 4 so this path is rarely hit, but kept for safety).
+  // Single-city chunked — used whenever a single-city trip exceeds
+  // MAX_DAYS_PER_CHUNK (4). Single-city max is now 7 days, so 5-7 day
+  // single-city trips commonly hit this path (not just multi-city).
   if (isFirstChunk) {
     return `Plan days ${chunkStartDay}-${chunkEndDay} of a ${totalDays}-day itinerary for ${city}.
 ${baseContext}
@@ -964,7 +982,7 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
       return;
     }
 
-    // ── Chunked path (>4 days, always multi-city) ──────────────────
+    // ── Chunked path (>4 days — multi-city, or single-city 5-7 days) ──
     let allDays = [];
     let finalTitle = null;
     let finalMeta = null;
