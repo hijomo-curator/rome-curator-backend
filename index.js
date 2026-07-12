@@ -556,6 +556,7 @@ Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}
   if (isFirstChunk) {
     return `Plan days ${chunkStartDay}-${chunkEndDay} of a ${totalDays}-day itinerary for ${city}.
 ${baseContext}
+This is the FIRST chunk of a longer trip. The "meta" field must summarise the FULL ${totalDays}-day trip (e.g. "${totalDays} days · food-first · ${pace} pace · ${budget || 'mid-range'} budget"), NOT just the ${chunkDayCount} days in this chunk — later chunks will not repeat or override this value, so get the total day count right here.
 Only write days ${chunkStartDay} to ${chunkEndDay} in the "days" array.`;
   }
   return `Continue the SAME ${totalDays}-day itinerary for ${city}. This is a later chunk.
@@ -1049,6 +1050,9 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
           finalTitle = parsedChunk.title || finalTitle;
           finalMeta = parsedChunk.meta || finalMeta;
           dayAllocation = parsedChunk.meta || null; // meta carries the day-allocation statement
+          if (finalMeta && !isMultiCity && !finalMeta.includes(String(days))) {
+            console.warn(`[generate-stream] meta field may not reflect full trip length — expected "${days}" somewhere in meta, got: "${finalMeta}"`);
+          }
         }
 
         if (requestId) appendProgress(requestId, chunkDays, { title: finalTitle, meta: finalMeta, dayAllocation });
