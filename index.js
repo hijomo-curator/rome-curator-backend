@@ -226,14 +226,17 @@ function validateTripShape({ isMultiCity, days, cities, city, interests }) {
 function getIP(req) { return req.ip || req.connection.remoteAddress || "unknown"; }
 function initUsage(ip) { if (!usageByIP[ip]) usageByIP[ip] = { generations: 0, refinements: 0 }; }
 function getTokenLimit(days, isMultiCity, cityCount = 1) {
-  // Base token budget scales with duration
+  // Base token budget scales with duration. Raised across the board after each
+  // stop grew from one merged bullet to three fields (place/blurb/detail) —
+  // the old budgets were sized for the single-string format and started
+  // truncating mid-JSON on real trips once stops got more verbose.
   let base;
-  if (days <= 3)       base = 2500;
-  else if (days <= 5)  base = 3500;
-  else if (days <= 8)  base = 5500;
-  else                 base = 7500; // 9-10 days
-  // Multi-city: +800 tokens per extra city (routing, transitions, day splits)
-  if (isMultiCity && cityCount > 1) base += (cityCount - 1) * 800;
+  if (days <= 3)       base = 3800;
+  else if (days <= 5)  base = 5200;
+  else if (days <= 8)  base = 7500;
+  else                 base = 9500; // 9-10 days
+  // Multi-city: +900 tokens per extra city (routing, transitions, day splits)
+  if (isMultiCity && cityCount > 1) base += (cityCount - 1) * 900;
   return base;
 }
 
@@ -253,10 +256,15 @@ function getDayChunks(totalDays) {
 
 // ── Token limit for a single chunk (not the whole trip) ───────────
 function getChunkTokenLimit(chunkDays, isMultiCity, cityCount = 1) {
-  // Roughly proportional to a 1-4 day single-call budget, with small overhead per day
-  let base = 900 + chunkDays * 700; // ~1 day:1600, 4 days:3700
-  if (isMultiCity && cityCount > 1) base += (cityCount - 1) * 400;
-  return Math.min(base, 5000); // safety ceiling per chunk
+  // Raised after a real production failure: a 6-day, 2-city trip (4-day
+  // first chunk) consistently failed to parse because the response got cut
+  // off mid-JSON. Root cause — each stop grew from one merged bullet to
+  // three fields (place/blurb/detail), which roughly doubled the token cost
+  // per stop, and this budget was never adjusted for that. Confirmed fixed
+  // by reproducing the exact same failing trip after raising these numbers.
+  let base = 1200 + chunkDays * 1200; // ~1 day:2400, 4 days:6000
+  if (isMultiCity && cityCount > 1) base += (cityCount - 1) * 500;
+  return Math.min(base, 8000); // safety ceiling per chunk
 }
 
 const MONTH_NAMES = ['','January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -811,7 +819,7 @@ Food-first, local-first, walkable clusters. Name exact places, dishes, neighbour
       const clean = stripped.slice(start, end + 1);
       itinerary = JSON.parse(clean);
     } catch {
-      console.error("[generate] JSON parse failed:", raw.slice(0, 300));
+      console.error("[generate] JSON parse failed:", raw.slice(0, 2000));
       return res.status(500).json({ error: "Failed to parse itinerary. Please try again." });
     }
 
@@ -957,7 +965,7 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
           if (start === -1 || end === -1) throw new Error('No JSON found');
           itinerary = JSON.parse(stripped.slice(start, end + 1));
         } catch {
-          console.error("[generate-stream] JSON parse failed:", rawText.slice(0, 300));
+          console.error("[generate-stream] JSON parse failed:", rawText.slice(0, 2000));
           if (requestId) errorProgress(requestId, 'Failed to parse itinerary.');
           if (!clientDisconnected) res.write(`data: ${JSON.stringify({ type: 'error', error: 'Failed to parse itinerary. Please try again.' })}\n\n`);
           if (!res.writableEnded) res.end();
@@ -1035,7 +1043,7 @@ app.post("/generate-itinerary-stream", limiter, async (req, res) => {
           if (start === -1 || end === -1) throw new Error('No JSON found');
           parsedChunk = JSON.parse(stripped.slice(start, end + 1));
         } catch {
-          console.error(`[generate-stream] Chunk ${i + 1} JSON parse failed:`, rawText.slice(0, 300));
+          console.error(`[generate-stream] Chunk ${i + 1} JSON parse failed:`, rawText.slice(0, 2000));
           throw new Error('Failed to parse part of the itinerary.');
         }
 
