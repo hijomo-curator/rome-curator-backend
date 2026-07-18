@@ -420,8 +420,9 @@ RULES:
 ${SAFETY_GUARDRAILS_LITE}
 - Return ONLY valid JSON. No markdown, no text outside the JSON.
 - Every morning/afternoon/evening block: exactly 3 stops.
-- Each stop is an object with three fields: "place" (exact name), "blurb" (a short, punchy one-liner with real personality/opinion — this is what the reader sees first), and "detail" (the full sentence: what to do/order, and why — one specific sentence, same as you'd always write).
-  Good blurb (voice-forward): "The real deal since 1932 — even the murals are worth the trip." Flat blurb (avoid — just a fact): "Irani chai & bun maska — 1932 institution."
+- Each stop is an object with three fields: "place" (exact name), "blurb" (6-8 WORDS MAXIMUM — a punchy teaser, not a shortened sentence; if you can't make it punchy in 6-8 words, cut information rather than go longer), and "detail" (the full sentence: what to do/order, and why — one specific sentence, same as you'd always write).
+  Good blurb (short AND punchy): "The real deal since 1932." Bad blurb (too long — a shortened sentence, not a teaser): "1932 institution serving Irani chai and snacks."
+  Good blurb: "Locals sneak in the side door." Bad blurb (fits the word count but flat, not punchy): "Side entrance available, usually less crowded."
 - "why" field: exactly 2 sentences explaining the day's curation logic.
 
 Return this exact JSON shape:
@@ -502,11 +503,14 @@ HARD RULES:
 - Every morning, afternoon and evening block must have exactly 3 stops.
 - Each stop is an object with three fields:
   - "place": the exact name of the place.
-  - "blurb": a short, punchy one-liner carrying real personality and opinion — this is what a reader sees first, so it must earn attention, not just state a fact.
+  - "blurb": 6-8 WORDS MAXIMUM. A punchy teaser with real personality and opinion — NOT a shortened version of the detail sentence. If you can't make it punchy in 6-8 words, cut information rather than write a longer, flatter line.
   - "detail": the full reasoning sentence — what to order or do, and why — one specific sentence, same length and voice you'd always write, completely unabridged.
-  Good blurb (voice-forward, this is the bar): "The real deal since 1932 — even the murals are worth the trip."
-  Flat blurb (avoid — reads as a spec sheet, no opinion): "Irani chai & bun maska — 1932 institution."
-  Another good example: "Skip the queue out front — locals slip in the side door." Flat version to avoid: "Side entrance available, less crowded."
+  Good blurb (short AND punchy — this is the bar): "The real deal since 1932."
+  Bad blurb (too long — this is just a shortened sentence, not a teaser): "1932 institution serving Irani chai and snacks near the beach."
+  Good blurb: "Locals sneak in the side door."
+  Bad blurb (fits the word count but is flat, not punchy): "Side entrance available, usually less crowded."
+  Good blurb: "Beach is yours again in October."
+  Bad blurb (still just a compressed fact): "Beach less crowded during October month."
 - The "why" field: exactly 2 sentences explaining the day's curation logic.
 
 Return this exact JSON shape:
@@ -564,7 +568,7 @@ Day allocation already decided: ${dayAllocation || '(see prior days for city bou
 Already generated so far (do not repeat these places, dishes, or neighbourhoods):
 ${recap}
 
-Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only), continuing in the correct city per the allocation. Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 stops, each an object with "place"/"blurb"/"detail"), "afternoon" (same, 3 stops), "evening" (same, 3 stops), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
+Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only), continuing in the correct city per the allocation. Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 stops, each an object with "place"/"blurb" (6-8 words max)/"detail"), "afternoon" (same, 3 stops), "evening" (same, 3 stops), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
   }
 
   // Single-city chunked — used whenever a single-city trip exceeds
@@ -581,7 +585,7 @@ ${baseContext}
 Already generated so far (do not repeat these places, dishes, or neighbourhoods):
 ${recap}
 
-Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only). Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 stops, each an object with "place"/"blurb"/"detail"), "afternoon" (same, 3 stops), "evening" (same, 3 stops), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
+Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only). Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 stops, each an object with "place"/"blurb" (6-8 words max)/"detail"), "afternoon" (same, 3 stops), "evening" (same, 3 stops), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
 }
 
 // ── Save email to Google Sheets via Sheetdb ───────────────────────
