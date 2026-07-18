@@ -411,12 +411,13 @@ RULES:
 - Match budget strictly. Relaxed pace = fewer stops with more time; packed = efficient routing.
 ${SAFETY_GUARDRAILS_LITE}
 - Return ONLY valid JSON. No markdown, no text outside the JSON.
-- Every morning/afternoon/evening block: exactly 3 bullet points.
-- Each bullet: name the exact place, what to do/order, and why — one specific sentence.
+- Every morning/afternoon/evening block: exactly 3 stops.
+- Each stop is an object with three fields: "place" (exact name), "blurb" (a short, punchy one-liner with real personality/opinion — this is what the reader sees first), and "detail" (the full sentence: what to do/order, and why — one specific sentence, same as you'd always write).
+  Good blurb (voice-forward): "The real deal since 1932 — even the murals are worth the trip." Flat blurb (avoid — just a fact): "Irani chai & bun maska — 1932 institution."
 - "why" field: exactly 2 sentences explaining the day's curation logic.
 
 Return this exact JSON shape:
-{"title":"short evocative title","meta":"e.g. 3 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":["bullet","bullet","bullet"],"afternoon":["bullet","bullet","bullet"],"evening":["bullet","bullet","bullet"],"why":"2-sentence rationale"}]}`;
+{"title":"short evocative title","meta":"e.g. 3 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":[{"place":"exact name","blurb":"short voice-forward line","detail":"full reasoning sentence"},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"afternoon":[{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"evening":[{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"why":"2-sentence rationale"}]}`;
 }
 
 function getSystemPrompt(city, month, travelStyle, budget, foodPreference) {
@@ -490,12 +491,18 @@ MULTI-CITY DAY ALLOCATION (when applicable):
 
 HARD RULES:
 - Return ONLY valid JSON. No markdown, no explanation, no text outside the JSON object.
-- Every morning, afternoon and evening block must have exactly 3 bullet points.
-- Each bullet: name the exact place, what to order or do, and why — all in one specific sentence.
+- Every morning, afternoon and evening block must have exactly 3 stops.
+- Each stop is an object with three fields:
+  - "place": the exact name of the place.
+  - "blurb": a short, punchy one-liner carrying real personality and opinion — this is what a reader sees first, so it must earn attention, not just state a fact.
+  - "detail": the full reasoning sentence — what to order or do, and why — one specific sentence, same length and voice you'd always write, completely unabridged.
+  Good blurb (voice-forward, this is the bar): "The real deal since 1932 — even the murals are worth the trip."
+  Flat blurb (avoid — reads as a spec sheet, no opinion): "Irani chai & bun maska — 1932 institution."
+  Another good example: "Skip the queue out front — locals slip in the side door." Flat version to avoid: "Side entrance available, less crowded."
 - The "why" field: exactly 2 sentences explaining the day's curation logic.
 
 Return this exact JSON shape:
-{"title":"short evocative title","meta":"e.g. 4 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":["bullet","bullet","bullet"],"afternoon":["bullet","bullet","bullet"],"evening":["bullet","bullet","bullet"],"why":"2-sentence rationale"}]}`;
+{"title":"short evocative title","meta":"e.g. 4 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":[{"place":"exact name","blurb":"short voice-forward line","detail":"full reasoning sentence"},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"afternoon":[{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"evening":[{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"why":"2-sentence rationale"}]}`;
 }
 
 // ── Build a short recap of prior chunks to avoid repeats ──────────
@@ -504,8 +511,10 @@ Return this exact JSON shape:
 function buildRecap(priorDays) {
   if (!priorDays || priorDays.length === 0) return '';
   const lines = priorDays.map(d => {
-    const allBullets = [...(d.morning || []), ...(d.afternoon || []), ...(d.evening || [])];
-    const places = allBullets.map(b => b.split(/[,–—-]/)[0].trim()).filter(Boolean);
+    const allStops = [...(d.morning || []), ...(d.afternoon || []), ...(d.evening || [])];
+    // Stops are {place, blurb, detail} objects; the string-split fallback covers
+    // any legacy plain-string stop that might still be in flight.
+    const places = allStops.map(s => typeof s === 'string' ? s.split(/[,–—-]/)[0].trim() : s.place).filter(Boolean);
     return `Day ${d.day} (${d.title || ''}): ${places.join('; ')}`;
   });
   return lines.join('\n');
@@ -547,7 +556,7 @@ Day allocation already decided: ${dayAllocation || '(see prior days for city bou
 Already generated so far (do not repeat these places, dishes, or neighbourhoods):
 ${recap}
 
-Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only), continuing in the correct city per the allocation. Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 bullets), "afternoon" (3 bullets), "evening" (3 bullets), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
+Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only), continuing in the correct city per the allocation. Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 stops, each an object with "place"/"blurb"/"detail"), "afternoon" (same, 3 stops), "evening" (same, 3 stops), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
   }
 
   // Single-city chunked — used whenever a single-city trip exceeds
@@ -564,7 +573,7 @@ ${baseContext}
 Already generated so far (do not repeat these places, dishes, or neighbourhoods):
 ${recap}
 
-Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only). Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 bullets), "afternoon" (3 bullets), "evening" (3 bullets), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
+Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only). Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 stops, each an object with "place"/"blurb"/"detail"), "afternoon" (same, 3 stops), "evening" (same, 3 stops), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
 }
 
 // ── Save email to Google Sheets via Sheetdb ───────────────────────
@@ -611,7 +620,7 @@ async function sendItineraryEmail({ toEmail, firstName, city, itinerary, travelM
         <div style="margin-bottom:12px;">
           <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#B85C38;font-weight:600;margin-bottom:6px;">${label}</div>
           <ul style="margin:0;padding-left:16px;">
-            ${(items || []).map(item => `<li style="font-size:14px;color:#2C1810;line-height:1.7;margin-bottom:4px;">${item}</li>`).join('')}
+            ${(items || []).map(item => `<li style="font-size:14px;color:#2C1810;line-height:1.7;margin-bottom:4px;">${typeof item === 'string' ? item : item.detail}</li>`).join('')}
           </ul>
         </div>`).join('');
       return `
