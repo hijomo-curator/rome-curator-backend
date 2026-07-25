@@ -227,7 +227,7 @@ function getIP(req) { return req.ip || req.connection.remoteAddress || "unknown"
 function initUsage(ip) { if (!usageByIP[ip]) usageByIP[ip] = { generations: 0, refinements: 0 }; }
 function getTokenLimit(days, isMultiCity, cityCount = 1) {
   // Base token budget scales with duration. Raised across the board after each
-  // stop grew from one merged bullet to three fields (place/blurb/detail) —
+  // stop grew from one merged bullet to structured fields (place/detail) —
   // the old budgets were sized for the single-string format and started
   // truncating mid-JSON on real trips once stops got more verbose.
   let base;
@@ -271,7 +271,7 @@ function getChunkTokenLimit(chunkDays, isMultiCity, cityCount = 1) {
   // Raised after a real production failure: a 6-day, 2-city trip (4-day
   // first chunk) consistently failed to parse because the response got cut
   // off mid-JSON. Root cause — each stop grew from one merged bullet to
-  // three fields (place/blurb/detail), which roughly doubled the token cost
+  // structured fields (place/detail), which roughly doubled the token cost
   // per stop, and this budget was never adjusted for that. Confirmed fixed
   // by reproducing the exact same failing trip after raising these numbers.
   let base = 1200 + chunkDays * 1200; // ~1 day:2400, 4 days:6000
@@ -432,14 +432,13 @@ RULES:
 ${SAFETY_GUARDRAILS_LITE}
 - Return ONLY valid JSON. No markdown, no text outside the JSON.
 - Every morning/afternoon/evening block: exactly 3 stops.
-- Each stop is an object with three fields: "place" (exact name), "blurb" (8-10 WORDS MAXIMUM — a punchy teaser, not a shortened sentence; if you can't make it punchy in that length, cut information rather than go longer), and "detail" (35-38 WORDS MAXIMUM — a genuine sentence with real personality and reasoning, just bounded — not a flattened one-liner).
-- "place" and "blurb" are ONE coordinated unit, not two independent fields — write the blurb as if it's a natural continuation of the name (they'll display together on one line, e.g. "Bar Internazionale, Positano — Old-school bar, zero tourist nonsense"), not a generic tag that happens to sit next to the name. "detail" is a separate, independent thought — this coordination only applies to place+blurb.
-  Good blurb (short, punchy, continues the name naturally): "The real deal since 1932 — even locals queue." Bad blurb (too long — a shortened sentence, not a teaser): "1932 institution serving Irani chai and snacks near the beach, still beloved."
-  Good blurb: "Locals sneak in through the unmarked side door." Bad blurb (fits the word count but flat, generic — could sit next to any place name): "Side entrance available, usually less crowded here."
+- Each stop is an object with two fields: "place" (a descriptive phrase naming the place AND what it is/why you're going, e.g. "Visit Kyani & Co., a 1904 Irani Cafe" — not just a bare name), and "detail" (a genuine sentence with real personality and reasoning — no length cap, write it exactly as long as it needs to be).
+  Good place phrase: "Grab espresso at Bar Internazionale, Positano's old-school local hangout." Bad place phrase (bare name, no framing): "Bar Internazionale."
+  Good place phrase: "Duck into Kyani & Co., a 1904 Irani Cafe still serving the original chai." Bad place phrase: "Kyani & Co."
 - "why" field: exactly 2 sentences explaining the day's curation logic.
 
 Return this exact JSON shape:
-{"title":"short evocative title","meta":"e.g. 3 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":[{"place":"exact name","blurb":"short voice-forward line","detail":"full reasoning sentence"},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"afternoon":[{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"evening":[{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"why":"2-sentence rationale"}]}`;
+{"title":"short evocative title","meta":"e.g. 3 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":[{"place":"descriptive phrase naming the place and what it is","detail":"full reasoning sentence"},{"place":"...","detail":"..."},{"place":"...","detail":"..."}],"afternoon":[{"place":"...","detail":"..."},{"place":"...","detail":"..."},{"place":"...","detail":"..."}],"evening":[{"place":"...","detail":"..."},{"place":"...","detail":"..."},{"place":"...","detail":"..."}],"why":"2-sentence rationale"}]}`;
 }
 
 function getSystemPrompt(city, month, travelStyle, budget, foodPreference) {
@@ -514,21 +513,15 @@ MULTI-CITY DAY ALLOCATION (when applicable):
 HARD RULES:
 - Return ONLY valid JSON. No markdown, no explanation, no text outside the JSON object.
 - Every morning, afternoon and evening block must have exactly 3 stops.
-- Each stop is an object with three fields:
-  - "place": the exact name of the place.
-  - "blurb": 8-10 WORDS MAXIMUM. A punchy teaser with real personality and opinion — NOT a shortened version of the detail sentence. If you can't make it punchy in that length, cut information rather than write a longer, flatter line.
-  - "detail": 35-38 WORDS MAXIMUM. The full reasoning — what to order or do, and why — a genuine sentence with real personality and reasoning, just bounded; not a flattened one-liner.
-  "place" and "blurb" are ONE coordinated unit, not two independently-generated fields — write the blurb as a natural continuation of the name (they display together on one line, e.g. "Bar Internazionale, Positano — Old-school bar, zero tourist nonsense"), not a generic tag that happens to sit next to the name. "detail" is a separate, independent thought — this coordination only applies to place+blurb.
-  Good blurb (short, punchy, continues the name naturally — this is the bar): "The real deal since 1932 — even locals queue outside."
-  Bad blurb (too long — this is just a shortened sentence, not a teaser): "1932 institution serving Irani chai and snacks near the beach, still beloved today."
-  Good blurb: "Locals sneak in through the unmarked side door."
-  Bad blurb (fits the word count but is flat, generic — could sit next to any place name): "Side entrance available, usually less crowded here in the evenings."
-  Good blurb: "Beach belongs to you again once October arrives."
-  Bad blurb (still just a compressed fact, no personality): "Beach less crowded during the October travel month."
+- Each stop is an object with two fields:
+  - "place": a descriptive phrase naming the place AND what it is or why you're going there — not just a bare name. e.g. "Visit Kyani & Co., a 1904 Irani Cafe" rather than "Kyani & Co."
+  - "detail": the full reasoning — what to order or do, and why — a genuine sentence with real personality and reasoning. No length cap: write it exactly as long as it needs to be, same voice and depth as before field-length tuning.
+  Good place phrase: "Grab espresso at Bar Internazionale, Positano's old-school local hangout." Bad place phrase (bare name, no framing): "Bar Internazionale."
+  Good place phrase: "Duck into Kyani & Co., a 1904 Irani Cafe still serving the original chai." Bad place phrase: "Kyani & Co."
 - The "why" field: exactly 2 sentences explaining the day's curation logic.
 
 Return this exact JSON shape:
-{"title":"short evocative title","meta":"e.g. 4 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":[{"place":"exact name","blurb":"short voice-forward line","detail":"full reasoning sentence"},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"afternoon":[{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"evening":[{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."},{"place":"...","blurb":"...","detail":"..."}],"why":"2-sentence rationale"}]}`;
+{"title":"short evocative title","meta":"e.g. 4 days · food-first · relaxed pace · mid-range budget","days":[{"day":1,"title":"short day title","morning":[{"place":"descriptive phrase naming the place and what it is","detail":"full reasoning sentence"},{"place":"...","detail":"..."},{"place":"...","detail":"..."}],"afternoon":[{"place":"...","detail":"..."},{"place":"...","detail":"..."},{"place":"...","detail":"..."}],"evening":[{"place":"...","detail":"..."},{"place":"...","detail":"..."},{"place":"...","detail":"..."}],"why":"2-sentence rationale"}]}`;
 }
 
 // ── Build a short recap of prior chunks to avoid repeats ──────────
@@ -538,7 +531,7 @@ function buildRecap(priorDays) {
   if (!priorDays || priorDays.length === 0) return '';
   const lines = priorDays.map(d => {
     const allStops = [...(d.morning || []), ...(d.afternoon || []), ...(d.evening || [])];
-    // Stops are {place, blurb, detail} objects; the string-split fallback covers
+    // Stops are {place, detail} objects; the string-split fallback covers
     // any legacy plain-string stop that might still be in flight.
     const places = allStops.map(s => typeof s === 'string' ? s.split(/[,–—-]/)[0].trim() : s.place).filter(Boolean);
     return `Day ${d.day} (${d.title || ''}): ${places.join('; ')}`;
@@ -582,7 +575,7 @@ Day allocation already decided: ${dayAllocation || '(see prior days for city bou
 Already generated so far (do not repeat these places, dishes, or neighbourhoods):
 ${recap}
 
-Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only), continuing in the correct city per the allocation. Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 stops, each an object with "place"/"blurb" (8-10 words, coordinated with place name)/"detail" (35-38 words max)), "afternoon" (same, 3 stops), "evening" (same, 3 stops), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
+Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only), continuing in the correct city per the allocation. Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 stops, each an object with "place" (descriptive phrase naming the place and what it is/why) and "detail" (full reasoning sentence, no length cap)), "afternoon" (same, 3 stops), "evening" (same, 3 stops), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
   }
 
   // Single-city chunked — used whenever a single-city trip exceeds
@@ -599,7 +592,7 @@ ${baseContext}
 Already generated so far (do not repeat these places, dishes, or neighbourhoods):
 ${recap}
 
-Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only). Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 stops, each an object with "place"/"blurb" (8-10 words, coordinated with place name)/"detail" (35-38 words max)), "afternoon" (same, 3 stops), "evening" (same, 3 stops), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
+Write ONLY days ${chunkStartDay} to ${chunkEndDay} (day numbers ${chunkStartDay}-${chunkEndDay} only). Return just {"days":[...]} for this chunk — but EVERY day object must still include ALL fields from the schema: "day", "title", "morning" (3 stops, each an object with "place" (descriptive phrase naming the place and what it is/why) and "detail" (full reasoning sentence, no length cap)), "afternoon" (same, 3 stops), "evening" (same, 3 stops), AND "why" (2-sentence rationale). Do not omit "why" or any other field on these later days.`;
 }
 
 // ── Save email to Google Sheets via Sheetdb ───────────────────────
